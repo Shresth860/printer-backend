@@ -1,0 +1,13 @@
+.git
+.gitignore
+.idea
+.env
+.env.*
+!.env.example
+target
+*.log
+*.pid
+*.class
+*.jar
+firebase-service-account*.json
+service-account*.json

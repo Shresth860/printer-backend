@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.idea/
+.github/modernize/
+target/
+*.log
+*.pid
+*.class
+*.jar
+firebase-service-account*.json
+service-account*.json

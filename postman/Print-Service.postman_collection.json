@@ -1,0 +1,50 @@
+{
+  "info": {
+    "_postman_id": "b9e0461b-83a8-4ed1-9ae8-70771a3d6c6d",
+    "name": "BizBiteNow Print Service",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080/api/v1" },
+    { "key": "serviceKey", "value": "" },
+    { "key": "accessToken", "value": "" },
+    { "key": "sellerId", "value": "seller-123" }
+  ],
+  "item": [
+    {
+      "name": "Create pairing code",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Service-Key", "value": "{{serviceKey}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/pairing-codes",
+        "body": { "mode": "raw", "raw": "{\"sellerId\":\"{{sellerId}}\"}", "options": { "raw": { "language": "json" } } }
+      }
+    },
+    {
+      "name": "Pair device",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/auth/pair",
+        "body": { "mode": "raw", "raw": "{\"code\":\"12345678\",\"deviceName\":\"Counter printer\",\"androidVersion\":\"14\",\"appVersion\":\"1.0.0\",\"fcmToken\":\"\"}", "options": { "raw": { "language": "json" } } }
+      }
+    },
+    {
+      "name": "Create print job",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "X-Service-Key", "value": "{{serviceKey}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/jobs",
+        "body": { "mode": "raw", "raw": "{\"sellerId\":\"{{sellerId}}\",\"orderId\":\"order-1\",\"jobType\":\"RECEIPT\",\"payload\":{\"paperWidthMm\":58,\"blocks\":[{\"type\":\"TEXT\",\"text\":\"Test receipt\",\"align\":\"CENTER\",\"bold\":true,\"size\":\"NORMAL\"}]},\"openCashDrawer\":false,\"cutPaper\":true,\"copies\":1,\"idempotencyKey\":\"order-1-receipt\"}", "options": { "raw": { "language": "json" } } }
+      }
+    },
+    {
+      "name": "Claim pending jobs",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{baseUrl}}/jobs/pending?limit=20"
+      }
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: print_service
+      POSTGRES_USER: print_service
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - print-service-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U print_service -d print_service"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  print-service:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/print_service
+      DATABASE_USERNAME: print_service
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?Set SERVICE_API_KEY}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS:-}
+      JOB_ARCHIVE_ENABLED: ${JOB_ARCHIVE_ENABLED:-true}
+    ports:
+      - "8080:8080"
+volumes:
+  print-service-data:
