@@ -17,6 +17,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.UUID;
 
 @Service
 public class PairingService {
@@ -27,24 +28,24 @@ public class PairingService {
     private final PairingCodeRepository pairingCodes;
     private final AppDeviceRepository devices;
     private final JwtService jwtService;
+    private final PairingCodeHasher pairingCodeHasher;
 
-    public PairingService(PairingCodeRepository pairingCodes, AppDeviceRepository devices, JwtService jwtService) {
+    public PairingService(PairingCodeRepository pairingCodes, AppDeviceRepository devices, JwtService jwtService,
+                          PairingCodeHasher pairingCodeHasher) {
         this.pairingCodes = pairingCodes;
         this.devices = devices;
         this.jwtService = jwtService;
+        this.pairingCodeHasher = pairingCodeHasher;
     }
 
     @Transactional
     public PairingCodeResponse createCode(String sellerId) {
         for (int attempt = 0; attempt < 10; attempt++) {
             String code = randomCode();
-            if (pairingCodes.existsByCode(code)) continue;
-            PairingCode pairingCode = new PairingCode();
-            pairingCode.setSellerId(sellerId);
-            pairingCode.setCode(code);
-            pairingCode.setExpiresAt(Instant.now().plus(PAIRING_TTL));
-            pairingCodes.saveAndFlush(pairingCode);
-            return new PairingCodeResponse(code, pairingCode.getExpiresAt());
+            Instant expiresAt = Instant.now().plus(PAIRING_TTL);
+            int inserted = pairingCodes.insertIfAbsent(UUID.randomUUID(), sellerId,
+                    pairingCodeHasher.hashCode(code), expiresAt);
+            if (inserted == 1) return new PairingCodeResponse(code, expiresAt);
         }
         throw new IllegalStateException("Unable to allocate a unique pairing code");
     }
@@ -52,7 +53,7 @@ public class PairingService {
     @Transactional
     public TokenResponse pair(PairDeviceRequest request) {
         Instant now = Instant.now();
-        PairingCode pairingCode = pairingCodes.findUsableForUpdate(request.code(), now)
+        PairingCode pairingCode = pairingCodes.findUsableForUpdate(pairingCodeHasher.hashCode(request.code()), now)
                 .orElseThrow(() -> new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY,
                         "INVALID_PAIRING_CODE", "Pairing code is invalid, expired, or already used"));
         pairingCode.setUsedAt(now);

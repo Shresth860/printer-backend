@@ -89,8 +89,18 @@ public class DeviceService {
     public void revoke(UUID id) {
         AppDevice device = devices.findById(id).orElseThrow(() ->
                 new BusinessException(HttpStatus.NOT_FOUND, "DEVICE_NOT_FOUND", "Device not found"));
+        revoke(device);
+    }
+
+    @Transactional
+    public void revokeSelf(DevicePrincipal principal) {
+        revoke(requireActive(principal.deviceId()));
+    }
+
+    private void revoke(AppDevice device) {
         device.setActive(false);
         device.setRefreshTokenHash(null);
+        device.setRefreshTokenExpiresAt(null);
         device.setFcmToken(null);
     }
 

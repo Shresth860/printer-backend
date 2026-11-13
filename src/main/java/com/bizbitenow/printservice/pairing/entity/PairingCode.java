@@ -24,8 +24,8 @@ public class PairingCode {
     private UUID id;
     @Column(name = "seller_id", nullable = false, length = 160)
     private String sellerId;
-    @Column(nullable = false, unique = true, length = 8)
-    private String code;
+    @Column(name = "code_hash", nullable = false, unique = true, length = 64)
+    private String codeHash;
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
     @Column(name = "used_at")

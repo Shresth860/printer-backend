@@ -44,6 +44,12 @@ public class DeviceController {
         deviceService.updateFcmToken(principal, request.fcmToken());
     }
 
+    @DeleteMapping("/devices/me")
+    @SecurityRequirement(name = "deviceBearer")
+    public void revokeSelf(@AuthenticationPrincipal DevicePrincipal principal) {
+        deviceService.revokeSelf(principal);
+    }
+
     @PutMapping("/devices/me/printers")
     @SecurityRequirement(name = "deviceBearer")
     public List<PrinterResponse> upsertPrinters(@AuthenticationPrincipal DevicePrincipal principal,

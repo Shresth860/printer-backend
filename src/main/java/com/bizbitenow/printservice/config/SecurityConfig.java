@@ -86,6 +86,11 @@ public class SecurityConfig {
                         ).hasAuthority("ROLE_DEVICE")
 
                         .requestMatchers(
+                                HttpMethod.DELETE,
+                                "/api/v1/devices/me"
+                        ).hasAuthority("ROLE_DEVICE")
+
+                        .requestMatchers(
                                 "/api/v1/devices/me/**"
                         ).hasAuthority("ROLE_DEVICE")
 
@@ -131,6 +136,9 @@ public class SecurityConfig {
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();
+        if (origins.contains("*")) {
+            throw new IllegalStateException("CORS_ALLOWED_ORIGINS must list explicit origins; '*' is not allowed");
+        }
 
         return request -> {
             CorsConfiguration configuration = new CorsConfiguration();

@@ -7,6 +7,7 @@ import com.bizbitenow.printservice.job.dto.CreatePrintJobRequest;
 import com.bizbitenow.printservice.job.dto.UpdateJobStatusRequest;
 import com.bizbitenow.printservice.job.service.PrintJobService;
 import com.bizbitenow.printservice.pairing.service.PairingService;
+import com.bizbitenow.printservice.pairing.service.PairingCodeHasher;
 import com.bizbitenow.printservice.security.JwtService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +42,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class PrintServiceIntegrationTest {
     private static final String SERVICE_KEY = "integration-service-key";
     private static final String JWT_SECRET = "integration-test-secret-material-over-32-bytes-long";
+    private static final String SELLER_ORIGIN = "https://seller.example.com";
 
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:15-alpine")
@@ -53,9 +55,11 @@ class PrintServiceIntegrationTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("app.security.jwt-secret", () -> JWT_SECRET);
         registry.add("app.security.service-api-key", () -> SERVICE_KEY);
+        registry.add("app.cors.allowed-origins", () -> SELLER_ORIGIN);
     }
 
     @Autowired PairingService pairingService;
+    @Autowired PairingCodeHasher pairingCodeHasher;
     @Autowired PrintJobService jobService;
     @Autowired JwtService jwtService;
     @Autowired ObjectMapper objectMapper;
@@ -101,7 +105,6 @@ class PrintServiceIntegrationTest {
             jobService.create(new CreatePrintJobRequest("seller-race", "order-" + i, JobType.TEST,
                     validPayload(), false, true, 1, "race-" + i));
         }
-
         var executor = Executors.newFixedThreadPool(2);
         CountDownLatch start = new CountDownLatch(1);
         try {
@@ -126,6 +129,116 @@ class PrintServiceIntegrationTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void pairingCodesAreHashedOneTimeAndExpire() throws Exception {
+        var pairingCode = pairingService.createCode("seller-pairing-security");
+        String storedHash = jdbc.queryForObject("select code_hash from pairing_code where seller_id = ?",
+                String.class, "seller-pairing-security");
+        assertEquals(pairingCodeHasher.hashCode(pairingCode.code()), storedHash);
+        assertFalse(jdbc.queryForObject("""
+                select exists (
+                    select 1 from information_schema.columns
+                    where table_name = 'pairing_code' and column_name = 'code'
+                )
+                """, Boolean.class));
+
+        String request = """
+                {"code":"%s","deviceName":"Secure printer","androidVersion":"14","appVersion":"1.0.0"}
+                """.formatted(pairingCode.code());
+        mockMvc.perform(post("/api/v1/auth/pair").contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isOk());
+        String reuseError = mockMvc.perform(post("/api/v1/auth/pair")
+                        .contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")))
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(reuseError.contains(pairingCode.code()));
+
+        var expiredCode = pairingService.createCode("seller-expired-code");
+        jdbc.update("update pairing_code set expires_at = now() - interval '1 second' where code_hash = ?",
+                pairingCodeHasher.hashCode(expiredCode.code()));
+        String expiredRequest = """
+                {"code":"%s","deviceName":"Expired printer","androidVersion":"14","appVersion":"1.0.0"}
+                """.formatted(expiredCode.code());
+        String expiryError = mockMvc.perform(post("/api/v1/auth/pair")
+                        .contentType(MediaType.APPLICATION_JSON).content(expiredRequest))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")))
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(expiryError.contains(expiredCode.code()));
+    }
+
+    @Test
+    void concurrentPairingCodeGenerationRemainsUnique() throws Exception {
+        int count = 12;
+        var executor = Executors.newFixedThreadPool(count);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<java.util.concurrent.Future<String>> results = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                int index = i;
+                results.add(executor.submit(() -> {
+                    start.await();
+                    return pairingService.createCode("seller-concurrent-" + index).code();
+                }));
+            }
+            start.countDown();
+            List<String> codes = new ArrayList<>();
+            for (var result : results) codes.add(result.get());
+
+            assertEquals(count, codes.stream().distinct().count());
+            assertEquals(count, jdbc.queryForObject("select count(distinct code_hash) from pairing_code", Integer.class));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void authenticatedDeviceCanOnlyRevokeItself() throws Exception {
+        TokenResponse self = pair("seller-self-revoke", "Self device");
+        TokenResponse other = pair("seller-self-revoke", "Other device");
+        String accessToken = jwtService.issueAccessToken(self.deviceId(), self.sellerId());
+
+        mockMvc.perform(delete("/api/v1/devices/me"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(delete("/api/v1/devices/me").header("X-Service-Key", SERVICE_KEY))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(delete("/api/v1/devices/me").header("Authorization", "Bearer " + accessToken))
+                .andExpect(status().isOk());
+
+        assertFalse(jdbc.queryForObject("select is_active from app_device where id = ?",
+                Boolean.class, self.deviceId()));
+        assertTrue(jdbc.queryForObject("select is_active from app_device where id = ?",
+                Boolean.class, other.deviceId()));
+        assertNull(jdbc.queryForObject("select refresh_token_hash from app_device where id = ?",
+                String.class, self.deviceId()));
+        mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"refreshToken\":\"" + self.refreshToken() + "\"}"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/devices/me/heartbeat")
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"appVersion\":\"1.0.0\",\"printers\":[]}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void latestReleaseAllowsCorsOnlyFromConfiguredFrontendOrigin() throws Exception {
+        jdbc.update("""
+                insert into app_release(version_code, version_name, apk_url, sha256)
+                values (1, '1.0.0', 'https://downloads.example.com/app.apk', repeat('a', 64))
+                """);
+
+        mockMvc.perform(get("/api/v1/app/latest-release").header("Origin", SELLER_ORIGIN))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Access-Control-Allow-Origin", SELLER_ORIGIN))
+                .andExpect(header().doesNotExist("Access-Control-Allow-Credentials"));
+        mockMvc.perform(get("/api/v1/app/latest-release").header("Origin", "https://untrusted.example"))
+                .andExpect(status().isForbidden())
+                .andExpect(header().doesNotExist("Access-Control-Allow-Origin"));
     }
 
     @Test
@@ -229,6 +342,7 @@ class PrintServiceIntegrationTest {
         assertSecurityRequirement(openApi, "/api/v1/jobs/{id}/retry", "post", "serviceKey");
         assertSecurityRequirement(openApi, "/api/v1/sellers/{sellerId}/devices", "get", "serviceKey");
         assertSecurityRequirement(openApi, "/api/v1/devices/{id}", "delete", "serviceKey");
+        assertSecurityRequirement(openApi, "/api/v1/devices/me", "delete", "deviceBearer");
         assertSecurityRequirement(openApi, "/api/v1/releases", "post", "serviceKey");
 
         assertSecurityRequirement(openApi, "/api/v1/devices/me/heartbeat", "post", "deviceBearer");
