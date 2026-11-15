@@ -6,9 +6,12 @@
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8080/api/v1" },
+    { "key": "printJobsUrl", "value": "http://localhost:8080/api/print-jobs" },
     { "key": "serviceKey", "value": "" },
     { "key": "accessToken", "value": "" },
-    { "key": "sellerId", "value": "seller-123" }
+    { "key": "sellerId", "value": "seller-123" },
+    { "key": "printerId", "value": "" },
+    { "key": "jobId", "value": "" }
   ],
   "item": [
     {
@@ -44,6 +47,40 @@
         "method": "GET",
         "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
         "url": "{{baseUrl}}/jobs/pending?limit=20"
+      }
+    },
+    {
+      "name": "Claim jobs for printer",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{printJobsUrl}}/pending?printerId={{printerId}}"
+      }
+    },
+    {
+      "name": "Report printing started",
+      "request": {
+        "method": "PATCH",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": "{{printJobsUrl}}/{{jobId}}/status",
+        "body": { "mode": "raw", "raw": "{\"status\":\"PRINTING\"}", "options": { "raw": { "language": "json" } } }
+      }
+    },
+    {
+      "name": "Confirm print result",
+      "request": {
+        "method": "PATCH",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "url": "{{printJobsUrl}}/{{jobId}}/status",
+        "body": { "mode": "raw", "raw": "{\"status\":\"SUCCESS\"}", "options": { "raw": { "language": "json" } } }
+      }
+    },
+    {
+      "name": "Get printer test payload",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+        "url": "{{printJobsUrl}}/test-payload?printerId={{printerId}}"
       }
     }
   ]

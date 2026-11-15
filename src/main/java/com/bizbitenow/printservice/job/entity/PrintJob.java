@@ -3,6 +3,7 @@ package com.bizbitenow.printservice.job.entity;
 import com.bizbitenow.printservice.common.JobStatus;
 import com.bizbitenow.printservice.common.JobType;
 import com.bizbitenow.printservice.device.entity.AppDevice;
+import com.bizbitenow.printservice.printer.entity.Printer;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -39,6 +40,9 @@ public class PrintJob {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "device_id")
     private AppDevice device;
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "printer_id")
+    private Printer printer;
     @Column(name = "order_id", nullable = false, length = 160)
     private String orderId;
     @Enumerated(EnumType.STRING)
@@ -53,7 +57,7 @@ public class PrintJob {
     @Column(name = "retry_count", nullable = false)
     private int retryCount;
     @Column(name = "max_retries", nullable = false)
-    private int maxRetries = 5;
+    private int maxRetries = 3;
     @Column(name = "idempotency_key", nullable = false, length = 160)
     private String idempotencyKey;
     @Column(name = "error_code", length = 120)
@@ -76,6 +80,10 @@ public class PrintJob {
     private Instant dispatchedAt;
     @Column(name = "completed_at")
     private Instant completedAt;
+    @Column(name = "printing_started_at")
+    private Instant printingStartedAt;
+    @Column(name = "printed_at")
+    private Instant printedAt;
     @Version
     @Column(nullable = false)
     private long version;

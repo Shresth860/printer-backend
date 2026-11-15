@@ -1,5 +1,6 @@
 package com.bizbitenow.printservice.job.controller;
 
+import com.bizbitenow.printservice.common.BusinessException;
 import com.bizbitenow.printservice.common.JobStatus;
 import com.bizbitenow.printservice.job.dto.CreatePrintJobRequest;
 import com.bizbitenow.printservice.job.dto.PrintJobResponse;
@@ -7,12 +8,14 @@ import com.bizbitenow.printservice.job.dto.UpdateJobStatusRequest;
 import com.bizbitenow.printservice.job.service.PrintJobService;
 import com.bizbitenow.printservice.security.DevicePrincipal;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -30,7 +33,7 @@ import java.util.List;
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/api/v1/jobs")
+@RequestMapping({"/api/v1/jobs", "/api/print-jobs"})
 @Validated
 public class PrintJobController {
     private final PrintJobService jobService;
@@ -72,11 +75,24 @@ public class PrintJobController {
         return jobService.retry(id);
     }
 
-    @GetMapping("/pending")
+    @GetMapping(value = "/pending", params = "!printerId")
     @SecurityRequirement(name = "deviceBearer")
-    public List<PrintJobResponse> pending(@AuthenticationPrincipal DevicePrincipal principal,
+    public List<PrintJobResponse> legacyPending(@AuthenticationPrincipal DevicePrincipal principal,
+                                          HttpServletRequest request,
                                           @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit) {
+        if (request.getRequestURI().startsWith("/api/print-jobs/")) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "PRINTER_ID_REQUIRED",
+                    "printerId is required");
+        }
         return jobService.claim(principal, limit);
+    }
+
+    @GetMapping(value = "/pending", params = "printerId")
+    @SecurityRequirement(name = "deviceBearer")
+    public List<PrintJobResponse> pendingForPrinter(@AuthenticationPrincipal DevicePrincipal principal,
+                                                    @RequestParam UUID printerId,
+                                                    @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit) {
+        return jobService.claimForPrinter(principal, printerId, limit);
     }
 
     @PatchMapping("/{id}/status")
@@ -93,5 +109,15 @@ public class PrintJobController {
                                           @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
         Pageable pageable = PageRequest.of(page, size);
         return jobService.history(principal, pageable);
+    }
+
+    @GetMapping("/test-payload")
+    @SecurityRequirement(name = "deviceBearer")
+    public ResponseEntity<byte[]> testPayload(@AuthenticationPrincipal DevicePrincipal principal,
+                                              @RequestParam UUID printerId) {
+        return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .header("Content-Disposition", "inline; filename=\"printer-test.bin\"")
+                .body(jobService.testPayload(printerId, principal));
     }
 }

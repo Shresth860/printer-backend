@@ -1,5 +1,5 @@
 package com.bizbitenow.printservice.common;
 
 public enum JobStatus {
-    PENDING, DISPATCHED, PRINTING, SUCCESS, FAILED, CANCELLED
+    PENDING, SENT_TO_DEVICE, DISPATCHED, PRINTING, SUCCESS, FAILED, CANCELLED
 }

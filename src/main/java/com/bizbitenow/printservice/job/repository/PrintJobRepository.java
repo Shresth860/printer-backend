@@ -21,18 +21,40 @@ public interface PrintJobRepository extends JpaRepository<PrintJob, UUID> {
     Page<PrintJob> findBySellerIdAndStatus(String sellerId, JobStatus status, Pageable pageable);
     Page<PrintJob> findByDeviceIdAndSellerId(UUID deviceId, String sellerId, Pageable pageable);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select j from PrintJob j where j.id = :id")
+    Optional<PrintJob> findByIdForUpdate(@Param("id") UUID id);
+
+    @Query("""
+            select j from PrintJob j
+            left join j.device d
+            left join j.printer p
+            left join p.device pd
+            where j.sellerId = :sellerId
+              and (d.id = :deviceId or pd.id = :deviceId)
+            """)
+    Page<PrintJob> findDeviceHistory(@Param("deviceId") UUID deviceId, @Param("sellerId") String sellerId,
+                                    Pageable pageable);
+
     @Query(value = """
             SELECT * FROM print_job
             WHERE seller_id = :sellerId AND status = 'PENDING'
               AND (device_id IS NULL OR device_id = :deviceId)
+              AND ((:printerId IS NULL AND (printer_id IS NULL OR printer_id IN
+                    (SELECT id FROM printer WHERE device_id = :deviceId)))
+                   OR (:printerId IS NOT NULL AND (printer_id IS NULL OR printer_id = :printerId)))
             ORDER BY created_at
             LIMIT :limit
             FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
     List<PrintJob> claimable(@Param("sellerId") String sellerId, @Param("deviceId") UUID deviceId,
-                             @Param("limit") int limit);
+                             @Param("printerId") UUID printerId, @Param("limit") int limit);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select j from PrintJob j where j.status = 'DISPATCHED' and j.dispatchedAt < :before")
+    @Query("select j from PrintJob j where j.status in ('DISPATCHED', 'SENT_TO_DEVICE') and j.dispatchedAt < :before")
     List<PrintJob> findStaleDispatchedForUpdate(@Param("before") Instant before);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select j from PrintJob j where j.status = 'PRINTING' and j.printingStartedAt < :before")
+    List<PrintJob> findStalePrintingForUpdate(@Param("before") Instant before);
 }

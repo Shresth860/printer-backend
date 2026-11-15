@@ -11,6 +11,7 @@ import com.bizbitenow.printservice.job.dto.CreatePrintJobRequest;
 import com.bizbitenow.printservice.job.dto.UpdateJobStatusRequest;
 import com.bizbitenow.printservice.job.entity.PrintJob;
 import com.bizbitenow.printservice.job.repository.PrintJobRepository;
+import com.bizbitenow.printservice.printer.repository.PrinterRepository;
 import com.bizbitenow.printservice.security.DevicePrincipal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -32,6 +34,7 @@ class PrintJobServiceTest {
     private PrintLogService logService;
     private JdbcTemplate jdbc;
     private PrintJobService service;
+    private EscPosReceiptGenerator escPos;
 
     @BeforeEach
     void setUp() {
@@ -40,8 +43,9 @@ class PrintJobServiceTest {
         deviceService = mock(DeviceService.class);
         logService = mock(PrintLogService.class);
         jdbc = mock(JdbcTemplate.class);
+        escPos = new EscPosReceiptGenerator();
         service = new PrintJobService(jobs, devices, deviceService, mock(ReceiptPayloadValidator.class),
-                logService, mock(FcmPushService.class), jdbc);
+                logService, mock(FcmPushService.class), jdbc, mock(PrinterRepository.class), escPos);
     }
 
     @Test
@@ -50,7 +54,7 @@ class PrintJobServiceTest {
         AppDevice device = device(jobId, "seller");
         PrintJob job = job(jobId, device, JobStatus.DISPATCHED);
         when(deviceService.requireActive(device.getId())).thenReturn(device);
-        when(jobs.findById(jobId)).thenReturn(Optional.of(job));
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
 
         BusinessException error = assertThrows(BusinessException.class,
                 () -> service.updateStatus(new DevicePrincipal(device.getId(), "seller"), jobId,
@@ -66,7 +70,7 @@ class PrintJobServiceTest {
         AppDevice device = device(jobId, "seller");
         PrintJob job = job(jobId, device, JobStatus.DISPATCHED);
         when(deviceService.requireActive(device.getId())).thenReturn(device);
-        when(jobs.findById(jobId)).thenReturn(Optional.of(job));
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         DevicePrincipal principal = new DevicePrincipal(device.getId(), "seller");
 
         service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.PRINTING, null, null));
@@ -74,6 +78,49 @@ class PrintJobServiceTest {
         service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null));
         assertEquals(JobStatus.SUCCESS, job.getStatus());
         assertNotNull(job.getCompletedAt());
+        assertNotNull(job.getPrintedAt());
+    }
+
+    @Test
+    void deviceFailureRetriesThreeTimesThenRemainsFailed() {
+        UUID jobId = UUID.randomUUID();
+        AppDevice device = device(jobId, "seller");
+        PrintJob job = job(jobId, device, JobStatus.PRINTING);
+        when(deviceService.requireActive(device.getId())).thenReturn(device);
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        DevicePrincipal principal = new DevicePrincipal(device.getId(), "seller");
+
+        TransactionSynchronizationManager.initSynchronization();
+        var retry = service.updateStatus(principal, jobId,
+                new UpdateJobStatusRequest(JobStatus.FAILED, "PAPER_OUT", "Paper roll empty"));
+        TransactionSynchronizationManager.clearSynchronization();
+        assertEquals(JobStatus.PENDING, retry.status());
+        assertEquals(1, retry.retryCount());
+        assertEquals("Paper roll empty", retry.errorMessage());
+
+        job.setDevice(device);
+        job.setStatus(JobStatus.PRINTING);
+        job.setRetryCount(3);
+        var terminal = service.updateStatus(principal, jobId,
+                new UpdateJobStatusRequest(JobStatus.FAILED, "PAPER_OUT", "Paper roll empty"));
+        assertEquals(JobStatus.FAILED, terminal.status());
+        assertEquals(3, terminal.retryCount());
+        assertNotNull(terminal.completedAt());
+    }
+
+    @Test
+    void stalePrintingJobsFailWithoutSuccess() {
+        UUID jobId = UUID.randomUUID();
+        PrintJob job = job(jobId, null, JobStatus.PRINTING);
+        when(jobs.findStalePrintingForUpdate(any())).thenReturn(java.util.List.of(job));
+
+        service.failTimedOutPrintingJobs();
+
+        assertEquals(JobStatus.FAILED, job.getStatus());
+        assertEquals("PRINT_TIMEOUT", job.getErrorCode());
+        assertNull(job.getPrintedAt());
+        verify(logService).add(job, JobStatus.FAILED,
+                "Device did not confirm the print within 60 seconds", null);
     }
 
     @Test
@@ -113,6 +160,12 @@ class PrintJobServiceTest {
         job.setDevice(device);
         job.setSellerId("seller");
         job.setStatus(status);
+        ObjectMapper mapper = new ObjectMapper();
+        var payload = mapper.createObjectNode().put("paperWidthMm", 58);
+        payload.putArray("blocks").addObject()
+                .put("type", "TEXT").put("text", "receipt").put("align", "CENTER")
+                .put("bold", true).put("size", "NORMAL");
+        job.setPayloadJson(payload);
         return job;
     }
 }

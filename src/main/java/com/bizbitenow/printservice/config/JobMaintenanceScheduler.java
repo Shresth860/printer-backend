@@ -26,6 +26,11 @@ public class JobMaintenanceScheduler {
         jobService.retryStaleJobs();
     }
 
+    @Scheduled(fixedDelay = 30_000)
+    public void failTimedOutPrintingJobs() {
+        jobService.failTimedOutPrintingJobs();
+    }
+
     @Scheduled(fixedDelay = 3_600_000)
     @Transactional
     public void cleanExpiredPairingCodes() {

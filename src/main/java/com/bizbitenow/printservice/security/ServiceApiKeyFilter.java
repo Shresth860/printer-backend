@@ -31,7 +31,8 @@ public class ServiceApiKeyFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !request.getRequestURI().startsWith("/api/v1/");
+        String path = request.getRequestURI();
+        return !path.startsWith("/api/v1/") && !path.startsWith("/api/print-jobs");
     }
 
     @Override
@@ -66,6 +67,11 @@ public class ServiceApiKeyFilter extends OncePerRequestFilter {
         if (path.equals("/api/v1/jobs/pending") || path.equals("/api/v1/jobs/history")) return false;
         if (path.matches("/api/v1/jobs/[^/]+") && "GET".equals(method)) return true;
         if (path.matches("/api/v1/jobs/[^/]+/(cancel|retry)") && "POST".equals(method)) return true;
+        if (path.equals("/api/print-jobs") && ("POST".equals(method) || "GET".equals(method))) return true;
+        if (path.equals("/api/print-jobs/pending") || path.equals("/api/print-jobs/history")
+                || path.equals("/api/print-jobs/test-payload")) return false;
+        if (path.matches("/api/print-jobs/[^/]+") && "GET".equals(method)) return true;
+        if (path.matches("/api/print-jobs/[^/]+/(cancel|retry)") && "POST".equals(method)) return true;
         if (path.matches("/api/v1/sellers/[^/]+/devices") && "GET".equals(method)) return true;
         return path.matches("/api/v1/devices/[^/]+") && "DELETE".equals(method);
     }

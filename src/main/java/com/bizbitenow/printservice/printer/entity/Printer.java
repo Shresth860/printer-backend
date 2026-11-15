@@ -48,6 +48,8 @@ public class Printer {
     private boolean defaultPrinter;
     @Column(name = "last_status", length = 80)
     private String lastStatus;
+    @Column(name = "last_seen_at")
+    private Instant lastSeenAt;
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

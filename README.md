@@ -43,6 +43,22 @@ Flyway creates and evolves the schema. Hibernate runs with `ddl-auto=validate`. 
 - API base: `/api/v1`
 - Panel/backend endpoints require `X-Service-Key`.
 - Device endpoints require `Authorization: Bearer <device-access-token>`.
+- Native Android clients can call the deployed HTTPS `BASE_URL` directly; CORS applies to browser clients, not native APK requests. Device APIs still require a paired-device bearer token.
+
+### Confirmed print workflow
+
+- `POST /api/print-jobs` — create a job (service key); new jobs are always `PENDING`.
+- `GET /api/print-jobs/pending?printerId=<uuid>` — claim jobs for a registered printer (device bearer token); claimed jobs become `SENT_TO_DEVICE`.
+- `PATCH /api/print-jobs/{id}/status` — APK callback with `PRINTING`, then `SUCCESS` or `FAILED` (device bearer token). Only a callback from the assigned device can set `SUCCESS`; the backend records `printedAt` at that point.
+- `GET /api/print-jobs/history?page=0&size=20` — paginated device print history.
+- `GET /api/print-jobs/test-payload?printerId=<uuid>` — raw ESC/POS test bytes for the registered printer's 58mm/80mm width (device bearer token).
+- `PATCH /api/v1/devices/me/printers/{printerId}/status` with `{"status":"CONNECTED"}` or `{"status":"DISCONNECTED"}` — update printer status and `lastSeenAt`. Device heartbeat also updates these fields.
+
+Receipt payloads accept structured JSON (`paperWidthMm` and `blocks`) or `{"format":"ESC_POS_BASE64","data":"..."}`. Structured receipts are encoded as ESC/POS commands with UTF-8 selected for the rupee symbol. Printers must support the UTF-8 codepage selector (`ESC t 255`) to render `₹` correctly.
+
+A device-reported `FAILED` is retried up to three times; after that the job remains `FAILED`. Jobs stuck in `PRINTING` for more than 60 seconds are marked `FAILED`. The server never infers successful printing from job creation, delivery, or timeout: the APK must report success only after its printer API confirms completion. Hardware state cannot be independently observed by the backend.
+
+The legacy `/api/v1/jobs` routes remain available for existing clients. Set `CORS_ALLOWED_ORIGINS` to exact trusted browser origins (never `*`); CORS does not replace API-key or device-token authentication.
 
 See `postman/Print-Service.postman_collection.json` for a starter collection. Pairing codes expire after ten minutes. Device access tokens last 15 minutes; refresh tokens last 30 days and rotate on each successful refresh.
 

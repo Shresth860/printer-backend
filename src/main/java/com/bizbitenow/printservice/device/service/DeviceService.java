@@ -3,6 +3,7 @@ package com.bizbitenow.printservice.device.service;
 import com.bizbitenow.printservice.common.BusinessException;
 import com.bizbitenow.printservice.device.dto.DeviceResponse;
 import com.bizbitenow.printservice.device.dto.HeartbeatRequest;
+import com.bizbitenow.printservice.device.dto.PrinterStatusRequest;
 import com.bizbitenow.printservice.device.entity.AppDevice;
 import com.bizbitenow.printservice.device.repository.AppDeviceRepository;
 import com.bizbitenow.printservice.printer.dto.PrinterResponse;
@@ -36,8 +37,25 @@ public class DeviceService {
         device.setAppVersion(request.appVersion());
         for (HeartbeatRequest.PrinterHeartbeat heartbeat : request.printers()) {
             printers.findByDeviceIdAndName(device.getId(), heartbeat.name()).ifPresent(printer ->
-                    printer.setLastStatus(heartbeat.status()));
+                    {
+                        printer.setLastStatus(heartbeat.status());
+                        printer.setLastSeenAt(now);
+                    });
         }
+    }
+
+    @Transactional
+    public void updatePrinterStatus(DevicePrincipal principal, UUID printerId, PrinterStatusRequest request) {
+        AppDevice device = requireActive(principal.deviceId());
+        Printer printer = printers.findById(printerId).orElseThrow(() ->
+                new BusinessException(HttpStatus.NOT_FOUND, "PRINTER_NOT_FOUND", "Printer not found"));
+        if (!printer.getDevice().getId().equals(device.getId())
+                || !printer.getSellerId().equals(principal.sellerId())) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "PRINTER_NOT_OWNED",
+                    "Printer is not assigned to this device");
+        }
+        printer.setLastStatus(request.status());
+        printer.setLastSeenAt(Instant.now());
     }
 
     @Transactional
@@ -118,6 +136,6 @@ public class DeviceService {
 
     private static PrinterResponse printerResponse(Printer printer) {
         return new PrinterResponse(printer.getId(), printer.getName(), printer.getConnectionType(), printer.getAddress(),
-                printer.getPaperWidthMm(), printer.isDefaultPrinter(), printer.getLastStatus());
+                printer.getPaperWidthMm(), printer.isDefaultPrinter(), printer.getLastStatus(), printer.getLastSeenAt());
     }
 }

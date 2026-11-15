@@ -32,6 +32,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -302,6 +303,76 @@ class PrintServiceIntegrationTest {
                         .content("{\"status\":\"PRINTING\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status", is("PRINTING")));
+    }
+
+    @Test
+    void printerApiDeliversEscPosAndRequiresDeviceConfirmationForSuccess() throws Exception {
+        TokenResponse device = pair("seller-real-print", "Real print device");
+        String accessToken = jwtService.issueAccessToken(device.deviceId(), device.sellerId());
+        String printersJson = mockMvc.perform(put("/api/v1/devices/me/printers")
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"printers":[{"name":"Receipt printer","connectionType":"BLUETOOTH",
+                                "address":"AA:BB:CC:DD","paperWidthMm":58,"defaultPrinter":true,
+                                "status":"DISCONNECTED"}]}
+                                """))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        UUID printerId = UUID.fromString(objectMapper.readTree(printersJson).get(0).get("id").asText());
+
+        mockMvc.perform(patch("/api/v1/devices/me/printers/{printerId}/status", printerId)
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"CONNECTED\"}"))
+                .andExpect(status().isOk());
+        assertTrue(jdbc.queryForObject("""
+                select last_status = 'CONNECTED' and last_seen_at is not null
+                from printer where id = ?
+                """, Boolean.class, printerId));
+
+        String payload = validPayload().toString();
+        String createRequest = "{\"sellerId\":\"seller-real-print\",\"orderId\":\"order-real-print\","
+                + "\"jobType\":\"RECEIPT\",\"printerId\":\"" + printerId + "\",\"payload\":" + payload
+                + ",\"openCashDrawer\":false,\"cutPaper\":true,\"copies\":1,"
+                + "\"idempotencyKey\":\"real-print-1\"}";
+        String createdResponse = mockMvc.perform(post("/api/print-jobs")
+                        .header("X-Service-Key", SERVICE_KEY)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(createRequest))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status", is("PENDING")))
+                .andExpect(jsonPath("$.printedAt", nullValue()))
+                .andReturn().getResponse().getContentAsString();
+        String jobId = objectMapper.readTree(createdResponse).get("id").asText();
+
+        mockMvc.perform(get("/api/print-jobs/pending").param("printerId", printerId.toString())
+                        .header("Authorization", "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].status", is("SENT_TO_DEVICE")));
+        mockMvc.perform(get("/api/print-jobs/test-payload").param("printerId", printerId.toString())
+                        .header("Authorization", "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_OCTET_STREAM));
+
+        mockMvc.perform(patch("/api/print-jobs/{id}/status", jobId)
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"PRINTING\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("PRINTING")))
+                .andExpect(jsonPath("$.printedAt", nullValue()));
+        mockMvc.perform(patch("/api/print-jobs/{id}/status", jobId)
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"SUCCESS\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("SUCCESS")))
+                .andExpect(jsonPath("$.printedAt").isNotEmpty());
+        mockMvc.perform(get("/api/print-jobs/history").param("page", "0").param("size", "10")
+                        .header("Authorization", "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements", is(1)));
     }
 
     @Test

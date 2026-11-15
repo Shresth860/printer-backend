@@ -8,6 +8,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
+import java.util.UUID;
+
 public record CreatePrintJobRequest(@NotBlank @Size(max = 160) String sellerId,
                                     @NotBlank @Size(max = 160) String orderId,
                                     @NotNull JobType jobType,
@@ -15,5 +17,10 @@ public record CreatePrintJobRequest(@NotBlank @Size(max = 160) String sellerId,
                                     boolean openCashDrawer,
                                     boolean cutPaper,
                                     @Min(1) @Max(10) int copies,
-                                    @NotBlank @Size(max = 160) String idempotencyKey) {
+                                    @NotBlank @Size(max = 160) String idempotencyKey,
+                                    UUID printerId) {
+    public CreatePrintJobRequest(String sellerId, String orderId, JobType jobType, JsonNode payload,
+                                 boolean openCashDrawer, boolean cutPaper, int copies, String idempotencyKey) {
+        this(sellerId, orderId, jobType, payload, openCashDrawer, cutPaper, copies, idempotencyKey, null);
+    }
 }

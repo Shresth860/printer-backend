@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Set;
 
 @Component
@@ -23,6 +24,15 @@ public class ReceiptPayloadValidator {
         if (payload == null || !payload.isObject()) invalid("Payload must be a JSON object");
         if (objectMapper.valueToTree(payload).toString().getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) {
             invalid("Payload exceeds 256 KB");
+        }
+        if ("ESC_POS_BASE64".equals(payload.path("format").asText())) {
+            try {
+                byte[] bytes = Base64.getDecoder().decode(payload.path("data").asText());
+                if (bytes.length == 0 || bytes.length > MAX_BYTES) invalid("Invalid ESC/POS payload size");
+                return;
+            } catch (IllegalArgumentException ex) {
+                invalid("ESC/POS payload must be valid base64");
+            }
         }
         JsonNode width = payload.get("paperWidthMm");
         if (width == null || !width.canConvertToInt() || (width.intValue() != 58 && width.intValue() != 80)) {

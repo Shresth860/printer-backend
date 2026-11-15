@@ -82,7 +82,15 @@ public class SecurityConfig {
 
                         .requestMatchers(
                                 HttpMethod.PATCH,
-                                "/api/v1/jobs/*/status"
+                                "/api/v1/jobs/*/status",
+                                "/api/print-jobs/*/status"
+                        ).hasAuthority("ROLE_DEVICE")
+
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/print-jobs/pending",
+                                "/api/print-jobs/history",
+                                "/api/print-jobs/test-payload"
                         ).hasAuthority("ROLE_DEVICE")
 
                         .requestMatchers(
@@ -105,6 +113,19 @@ public class SecurityConfig {
                         .requestMatchers(
                                 HttpMethod.POST,
                                 "/api/v1/jobs/**"
+                        ).hasAuthority("ROLE_SERVICE")
+
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/api/print-jobs",
+                                "/api/print-jobs/*/cancel",
+                                "/api/print-jobs/*/retry"
+                        ).hasAuthority("ROLE_SERVICE")
+
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/print-jobs",
+                                "/api/print-jobs/*"
                         ).hasAuthority("ROLE_SERVICE")
 
                         .requestMatchers(

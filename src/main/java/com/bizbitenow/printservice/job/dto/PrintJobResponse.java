@@ -10,5 +10,6 @@ import java.util.UUID;
 public record PrintJobResponse(UUID id, String sellerId, UUID deviceId, String orderId, JobType jobType,
                                JsonNode payload, JobStatus status, int retryCount, int maxRetries,
                                String errorCode, String errorMessage, boolean openCashDrawer, boolean cutPaper,
-                               int copies, Instant createdAt, Instant dispatchedAt, Instant completedAt) {
+                               int copies, Instant createdAt, Instant updatedAt, Instant dispatchedAt,
+                               Instant printedAt, Instant completedAt, UUID printerId, String payloadBytesBase64) {
 }

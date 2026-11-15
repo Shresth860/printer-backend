@@ -3,6 +3,7 @@ package com.bizbitenow.printservice.device.controller;
 import com.bizbitenow.printservice.device.dto.DeviceResponse;
 import com.bizbitenow.printservice.device.dto.FcmTokenRequest;
 import com.bizbitenow.printservice.device.dto.HeartbeatRequest;
+import com.bizbitenow.printservice.device.dto.PrinterStatusRequest;
 import com.bizbitenow.printservice.device.service.DeviceService;
 import com.bizbitenow.printservice.printer.dto.PrinterResponse;
 import com.bizbitenow.printservice.printer.dto.PrinterUpsertRequest;
@@ -13,6 +14,7 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,6 +37,14 @@ public class DeviceController {
     public void heartbeat(@AuthenticationPrincipal DevicePrincipal principal,
                           @Valid @RequestBody HeartbeatRequest request) {
         deviceService.heartbeat(principal, request);
+    }
+
+    @PatchMapping("/devices/me/printers/{printerId}/status")
+    @SecurityRequirement(name = "deviceBearer")
+    public void updatePrinterStatus(@AuthenticationPrincipal DevicePrincipal principal,
+                                    @PathVariable UUID printerId,
+                                    @Valid @RequestBody PrinterStatusRequest request) {
+        deviceService.updatePrinterStatus(principal, printerId, request);
     }
 
     @PutMapping("/devices/me/fcm-token")
