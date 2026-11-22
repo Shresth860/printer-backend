@@ -1,4 +1,5 @@
 ALTER TABLE print_job DROP CONSTRAINT print_job_status_check;
+ALTER TABLE print_job ALTER COLUMN status TYPE varchar(32);
 
 UPDATE print_job SET status = CASE status
     WHEN 'PENDING' THEN 'QUEUED'

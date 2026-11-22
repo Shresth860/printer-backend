@@ -33,7 +33,7 @@ public class PrintLog {
     @JoinColumn(name = "job_id", nullable = false)
     private PrintJob job;
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 16)
+    @Column(nullable = false, length = 32)
     private JobStatus status;
     @Column(length = 1000)
     private String message;
