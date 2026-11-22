@@ -30,6 +30,8 @@ public class PairingCode {
     private Instant expiresAt;
     @Column(name = "used_at")
     private Instant usedAt;
+    @Column(name = "paired_device_id")
+    private UUID pairedDeviceId;
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

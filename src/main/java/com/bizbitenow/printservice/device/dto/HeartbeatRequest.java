@@ -11,6 +11,6 @@ import java.util.List;
 public record HeartbeatRequest(@NotBlank @Size(max = 80) String appVersion,
                                @NotNull @Valid @Size(max = 100) List<PrinterHeartbeat> printers) {
     public record PrinterHeartbeat(@NotBlank @Size(max = 160) String name,
-                                   @NotBlank @Pattern(regexp = "CONNECTED|DISCONNECTED") String status) {
+                                   @NotBlank @Pattern(regexp = "ONLINE|OFFLINE|PAPER_OUT|COVER_OPEN|ERROR|CONNECTED|DISCONNECTED") String status) {
     }
 }

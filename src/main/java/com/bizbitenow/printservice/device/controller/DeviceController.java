@@ -73,6 +73,12 @@ public class DeviceController {
         return deviceService.sellerDevices(sellerId);
     }
 
+    @org.springframework.web.bind.annotation.GetMapping("/sellers/{sellerId}/printers")
+    @SecurityRequirement(name = "serviceKey")
+    public List<PrinterResponse> sellerPrinters(@PathVariable String sellerId) {
+        return deviceService.sellerPrinters(sellerId);
+    }
+
     @DeleteMapping("/devices/{id}")
     @SecurityRequirement(name = "serviceKey")
     public void revoke(@PathVariable UUID id) {

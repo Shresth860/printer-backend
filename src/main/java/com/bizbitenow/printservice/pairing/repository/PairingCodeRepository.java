@@ -25,4 +25,7 @@ public interface PairingCodeRepository extends JpaRepository<PairingCode, UUID> 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from PairingCode p where p.codeHash = :codeHash and p.usedAt is null and p.expiresAt > :now")
     Optional<PairingCode> findUsableForUpdate(@Param("codeHash") String codeHash, @Param("now") Instant now);
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select p from PairingCode p where p.codeHash = :codeHash")
+    Optional<PairingCode> findByCodeHashForUpdate(@Param("codeHash") String codeHash);
 }

@@ -8,6 +8,8 @@ import com.bizbitenow.printservice.device.repository.AppDeviceRepository;
 import com.bizbitenow.printservice.device.service.DeviceService;
 import com.bizbitenow.printservice.device.service.FcmPushService;
 import com.bizbitenow.printservice.job.dto.CreatePrintJobRequest;
+import com.bizbitenow.printservice.job.dto.OfflineJobBatchRequest;
+import com.bizbitenow.printservice.job.dto.OfflineJobBatchResponse;
 import com.bizbitenow.printservice.job.dto.PrintJobResponse;
 import com.bizbitenow.printservice.job.dto.UpdateJobStatusRequest;
 import com.bizbitenow.printservice.job.entity.PrintJob;
@@ -18,6 +20,7 @@ import com.bizbitenow.printservice.security.DevicePrincipal;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -33,6 +36,10 @@ import java.util.UUID;
 @Service
 @Slf4j
 public class PrintJobService {
+    @Value("${app.jobs.max-retries:3}")
+    private int configuredMaxRetries = 3;
+    @Value("${app.jobs.retry-delay-seconds:30}")
+    private long retryDelaySeconds = 30;
     private final PrintJobRepository jobs;
     private final AppDeviceRepository devices;
     private final DeviceService deviceService;
@@ -64,8 +71,8 @@ public class PrintJobService {
         UUID newId = UUID.randomUUID();
         String sql = """
                 INSERT INTO print_job (id, seller_id, printer_id, order_id, job_type, payload_json, status, idempotency_key,
-                    open_cash_drawer, cut_paper, copies)
-                VALUES (?, ?, ?, ?, ?, ?::jsonb, 'PENDING', ?, ?, ?, ?)
+                    open_cash_drawer, cut_paper, copies, max_retries)
+                VALUES (?, ?, ?, ?, ?, ?::jsonb, 'QUEUED', ?, ?, ?, ?, ?)
                 ON CONFLICT (seller_id, idempotency_key) DO NOTHING
                 RETURNING id
                 """;
@@ -79,13 +86,13 @@ public class PrintJobService {
         }
         UUID insertedId = jdbc.query(sql, rs -> rs.next() ? rs.getObject(1, UUID.class) : null,
                 newId, request.sellerId(), request.printerId(), request.orderId(), request.jobType().name(), request.payload().toString(),
-                request.idempotencyKey(), request.openCashDrawer(), request.cutPaper(), request.copies());
+                request.idempotencyKey(), request.openCashDrawer(), request.cutPaper(), request.copies(), configuredMaxRetries);
         PrintJob job = jobs.findById(insertedId == null ? jobs.findBySellerIdAndIdempotencyKey(
                 request.sellerId(), request.idempotencyKey()).orElseThrow().getId() : insertedId)
                 .orElseThrow(() -> new IllegalStateException("Inserted print job was not found"));
         boolean created = insertedId != null;
         if (created) {
-            logService.add(job, JobStatus.PENDING, "Job created", null);
+            logService.add(job, JobStatus.QUEUED, "Job created", null);
             dispatchAfterCommit(job.getId(), job.getSellerId());
         }
         return new CreatedJob(toResponse(job), created);
@@ -93,8 +100,9 @@ public class PrintJobService {
 
     @Transactional(readOnly = true)
     public Page<PrintJobResponse> list(String sellerId, JobStatus status, Pageable pageable) {
-        Page<PrintJob> page = status == null ? jobs.findBySellerId(sellerId, pageable)
-                : jobs.findBySellerIdAndStatus(sellerId, status, pageable);
+        JobStatus canonicalFilter = canonicalStatus(status);
+        Page<PrintJob> page = canonicalFilter == null ? jobs.findBySellerId(sellerId, pageable)
+                : jobs.findBySellerIdAndStatus(sellerId, canonicalFilter, pageable);
         return page.map(this::toResponse);
     }
 
@@ -107,8 +115,7 @@ public class PrintJobService {
     public PrintJobResponse cancel(UUID id) {
         PrintJob job = jobs.findByIdForUpdate(id).orElseThrow(() ->
                 new BusinessException(HttpStatus.NOT_FOUND, "JOB_NOT_FOUND", "Print job not found"));
-        if (job.getStatus() != JobStatus.PENDING && job.getStatus() != JobStatus.DISPATCHED
-                && job.getStatus() != JobStatus.SENT_TO_DEVICE) {
+        if (job.getStatus() != JobStatus.QUEUED && job.getStatus() != JobStatus.SENT_TO_PRINTER) {
             throw conflict("Only pending or dispatched jobs can be cancelled");
         }
         job.setStatus(JobStatus.CANCELLED);
@@ -122,15 +129,16 @@ public class PrintJobService {
         PrintJob job = jobs.findByIdForUpdate(id).orElseThrow(() ->
                 new BusinessException(HttpStatus.NOT_FOUND, "JOB_NOT_FOUND", "Print job not found"));
         if (job.getStatus() != JobStatus.FAILED) throw conflict("Only failed jobs can be retried");
-        if (job.getRetryCount() >= 3) throw conflict("Maximum print retries exceeded");
-        job.setStatus(JobStatus.PENDING);
+        if (job.getRetryCount() >= job.getMaxRetries()) throw conflict("Maximum print retries exceeded");
+        job.setStatus(JobStatus.QUEUED);
         job.setRetryCount(job.getRetryCount() + 1);
         job.setErrorCode(null);
         job.setErrorMessage(null);
         job.setDispatchedAt(null);
         job.setCompletedAt(null);
         job.setPrintedAt(null);
-        logService.add(job, JobStatus.PENDING, "Job manually retried", null);
+        job.setNextRetryAt(null);
+        logService.add(job, JobStatus.QUEUED, "Job manually retried", null);
         dispatchAfterCommit(job.getId(), job.getSellerId());
         return toResponse(job);
     }
@@ -154,7 +162,8 @@ public class PrintJobService {
                 printer == null ? null : printer.getId(), limit);
         Instant now = Instant.now();
         for (PrintJob job : claimed) {
-            job.setStatus(newStatus ? JobStatus.SENT_TO_DEVICE : JobStatus.DISPATCHED);
+            job.setStatus(JobStatus.SENT_TO_PRINTER);
+            job.setClientUpdatedAt(now);
             job.setDevice(device);
             if (job.getPrinter() == null && printer != null) job.setPrinter(printer);
             job.setDispatchedAt(now);
@@ -166,9 +175,89 @@ public class PrintJobService {
     }
 
     @Transactional
+    public OfflineJobBatchResponse syncOfflineResults(DevicePrincipal principal, OfflineJobBatchRequest request) {
+        AppDevice device = deviceService.requireActive(principal.deviceId());
+        List<OfflineJobBatchResponse.Item> results = new java.util.ArrayList<>();
+        for (OfflineJobBatchRequest.Result result : request.results()) {
+            int inserted = jdbc.update("""
+                    INSERT INTO print_job_sync_event(client_id, job_id, client_timestamp)
+                    VALUES (?, ?, ?) ON CONFLICT (client_id) DO NOTHING
+                    """, result.clientId(), result.jobId(), java.sql.Timestamp.from(result.clientTimestamp()));
+            if (inserted == 0) {
+                UUID originalJobId = jdbc.queryForObject(
+                        "SELECT job_id FROM print_job_sync_event WHERE client_id = ?", UUID.class, result.clientId());
+                if (!result.jobId().equals(originalJobId)) {
+                    throw conflict("clientId has already been used for a different job");
+                }
+                PrintJob duplicateJob = jobs.findById(result.jobId()).orElse(null);
+                results.add(new OfflineJobBatchResponse.Item(result.clientId(), result.jobId(),
+                        duplicateJob == null ? null : duplicateJob.getStatus(), false, true));
+                continue;
+            }
+            PrintJob job = jobs.findByIdForUpdate(result.jobId()).orElseThrow(() ->
+                    new BusinessException(HttpStatus.NOT_FOUND, "JOB_NOT_FOUND", "Print job not found"));
+            if (job.getDevice() == null || !job.getDevice().getId().equals(device.getId())
+                    || !job.getSellerId().equals(device.getSellerId())) {
+                throw new BusinessException(HttpStatus.FORBIDDEN, "JOB_NOT_OWNED", "Job is not assigned to this device");
+            }
+            if (job.getClientUpdatedAt() != null && !result.clientTimestamp().isAfter(job.getClientUpdatedAt())) {
+                results.add(new OfflineJobBatchResponse.Item(result.clientId(), result.jobId(), job.getStatus(), false, false));
+                continue;
+            }
+            applyOfflineResult(job, device, result);
+            job.setClientUpdatedAt(result.clientTimestamp());
+            results.add(new OfflineJobBatchResponse.Item(result.clientId(), result.jobId(), job.getStatus(), true, false));
+        }
+        return new OfflineJobBatchResponse(List.copyOf(results));
+    }
+
+    private void applyOfflineResult(PrintJob job, AppDevice device, OfflineJobBatchRequest.Result result) {
+        JobStatus target = canonicalStatus(result.status());
+        if (target == JobStatus.FAILED) {
+            if (result.errorMessage() == null || result.errorMessage().isBlank()) {
+                throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_STATUS", "errorMessage is required when status is FAILED");
+            }
+            if (job.getStatus() != JobStatus.SENT_TO_PRINTER) throw conflict("Illegal job status transition");
+            Instant now = result.clientTimestamp();
+            job.setErrorCode(result.errorCode());
+            job.setErrorMessage(result.errorMessage());
+            job.setPrintingStartedAt(null);
+            logService.add(job, JobStatus.FAILED, result.errorMessage(), device);
+            if (job.getRetryCount() < job.getMaxRetries()) {
+                job.setRetryCount(job.getRetryCount() + 1);
+                job.setStatus(JobStatus.QUEUED);
+                job.setDevice(null);
+                job.setDispatchedAt(null);
+                job.setCompletedAt(null);
+                job.setNextRetryAt(now.plusSeconds(retryDelaySeconds));
+                logService.add(job, JobStatus.QUEUED, "Retry scheduled after offline failure sync", null);
+            } else {
+                job.setStatus(JobStatus.FAILED);
+                job.setCompletedAt(now);
+            }
+            return;
+        }
+        if (target != JobStatus.PRINTED_CONFIRMED || job.getStatus() != JobStatus.SENT_TO_PRINTER) {
+            throw conflict("Offline sync only accepts FAILED or PRINTED_CONFIRMED from SENT_TO_PRINTER");
+        }
+        if (!Boolean.TRUE.equals(result.connected()) || result.bytesWritten() == null || result.bytesWritten() <= 0
+                || !Boolean.TRUE.equals(result.flushOk())) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "PRINT_CONFIRMATION_REQUIRED",
+                    "PRINTED_CONFIRMED requires connected=true, bytesWritten>0, and flushOk=true");
+        }
+        job.setStatus(JobStatus.PRINTED_CONFIRMED);
+        job.setPrinterConnected(true);
+        job.setBytesWritten(result.bytesWritten());
+        job.setFlushOk(true);
+        job.setPrintedAt(result.clientTimestamp());
+        job.setCompletedAt(result.clientTimestamp());
+        logService.add(job, JobStatus.PRINTED_CONFIRMED, "Offline print confirmation synced", device);
+    }
+
+    @Transactional
     public PrintJobResponse updateStatus(DevicePrincipal principal, UUID id, UpdateJobStatusRequest request) {
         if (request.status() != JobStatus.PRINTING && request.status() != JobStatus.SUCCESS
-                && request.status() != JobStatus.FAILED) {
+                && request.status() != JobStatus.PRINTED_CONFIRMED && request.status() != JobStatus.FAILED) {
             throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_STATUS",
                     "Device status must be PRINTING, SUCCESS, or FAILED");
         }
@@ -183,40 +272,55 @@ public class PrintJobService {
         if (job.getDevice() == null || !job.getDevice().getId().equals(device.getId())) {
             throw new BusinessException(HttpStatus.FORBIDDEN, "JOB_NOT_OWNED", "Job is not assigned to this device");
         }
-        boolean legal = ((job.getStatus() == JobStatus.DISPATCHED || job.getStatus() == JobStatus.SENT_TO_DEVICE)
-                && request.status() == JobStatus.PRINTING)
-                || (job.getStatus() == JobStatus.PRINTING
-                && (request.status() == JobStatus.SUCCESS || request.status() == JobStatus.FAILED));
+        JobStatus target = canonicalStatus(request.status());
+        if (job.getStatus() == target && (target == JobStatus.PRINTED_CONFIRMED || target == JobStatus.FAILED)) {
+            return toResponse(job);
+        }
+        boolean printingCallback = request.status() == JobStatus.PRINTING;
+        boolean successCallback = target == JobStatus.PRINTED_CONFIRMED;
+        boolean legacySuccess = request.status() == JobStatus.SUCCESS;
+        boolean legal = job.getStatus() == JobStatus.SENT_TO_PRINTER && (printingCallback || successCallback || request.status() == JobStatus.FAILED)
+                && (!legacySuccess || job.getPrintingStartedAt() != null);
         if (!legal) throw conflict("Illegal job status transition");
+        if (successCallback &&
+                (!Boolean.TRUE.equals(request.connected()) || request.bytesWritten() == null || request.bytesWritten() <= 0
+                        || !Boolean.TRUE.equals(request.flushOk()))) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "PRINT_CONFIRMATION_REQUIRED",
+                    "SUCCESS requires connected=true, bytesWritten>0, and flushOk=true");
+        }
         Instant now = Instant.now();
-        if (request.status() == JobStatus.PRINTING) {
-            job.setStatus(JobStatus.PRINTING);
+        job.setClientUpdatedAt(now);
+        if (printingCallback) {
             job.setPrintingStartedAt(now);
             logService.add(job, JobStatus.PRINTING, safeMessage(request), device);
-        } else if (request.status() == JobStatus.SUCCESS) {
-            job.setStatus(JobStatus.SUCCESS);
+        } else if (successCallback) {
+            job.setStatus(JobStatus.PRINTED_CONFIRMED);
+            job.setPrinterConnected(request.connected());
+            job.setBytesWritten(request.bytesWritten());
+            job.setFlushOk(request.flushOk());
             job.setPrintedAt(now);
             job.setCompletedAt(now);
             job.setPrintingStartedAt(null);
             job.setErrorCode(null);
             job.setErrorMessage(null);
-            logService.add(job, JobStatus.SUCCESS, safeMessage(request), device);
+            logService.add(job, JobStatus.PRINTED_CONFIRMED, safeMessage(request), device);
         } else {
             job.setErrorCode(request.errorCode());
             job.setErrorMessage(request.errorMessage());
             job.setPrintingStartedAt(null);
             logService.add(job, JobStatus.FAILED, safeMessage(request), device);
-            if (job.getRetryCount() < 3) {
+            if (job.getRetryCount() < job.getMaxRetries()) {
                 job.setRetryCount(job.getRetryCount() + 1);
-                job.setStatus(JobStatus.PENDING);
+                job.setStatus(JobStatus.QUEUED);
                 job.setDevice(null);
                 job.setDispatchedAt(null);
                 job.setCompletedAt(null);
-                logService.add(job, JobStatus.PENDING, "Retry scheduled after device-reported failure", null);
-                dispatchAfterCommit(job.getId(), job.getSellerId());
+                job.setNextRetryAt(now.plusSeconds(retryDelaySeconds));
+                logService.add(job, JobStatus.QUEUED, "Retry scheduled after device-reported failure", null);
             } else {
                 job.setStatus(JobStatus.FAILED);
                 job.setCompletedAt(now);
+                job.setNextRetryAt(null);
             }
         }
         return toResponse(job);
@@ -233,9 +337,10 @@ public class PrintJobService {
     public void retryStaleJobs() {
         List<PrintJob> staleJobs = jobs.findStaleDispatchedForUpdate(Instant.now().minusSeconds(120));
         for (PrintJob job : staleJobs) {
-            job.setRetryCount(job.getRetryCount() + 1);
             job.setDispatchedAt(null);
             job.setDevice(null);
+            job.setErrorCode("DISPATCH_TIMEOUT");
+            job.setErrorMessage("Printer device did not claim the queued job in time");
             if (job.getRetryCount() >= job.getMaxRetries()) {
                 job.setStatus(JobStatus.FAILED);
                 job.setErrorCode("MAX_RETRIES");
@@ -243,8 +348,10 @@ public class PrintJobService {
                 job.setCompletedAt(Instant.now());
                 logService.add(job, JobStatus.FAILED, "Maximum dispatch retries exceeded", null);
             } else {
-                job.setStatus(JobStatus.PENDING);
-                logService.add(job, JobStatus.PENDING, "Dispatch timed out; returned to queue", null);
+                job.setRetryCount(job.getRetryCount() + 1);
+                job.setStatus(JobStatus.QUEUED);
+                job.setNextRetryAt(Instant.now().plusSeconds(retryDelaySeconds));
+                logService.add(job, JobStatus.QUEUED, "Dispatch timed out; retry scheduled", null);
             }
         }
     }
@@ -254,13 +361,34 @@ public class PrintJobService {
         Instant now = Instant.now();
         List<PrintJob> staleJobs = jobs.findStalePrintingForUpdate(now.minusSeconds(60));
         for (PrintJob job : staleJobs) {
-            job.setStatus(JobStatus.FAILED);
             job.setErrorCode("PRINT_TIMEOUT");
             job.setErrorMessage("Device did not confirm the print within 60 seconds");
-            job.setCompletedAt(now);
             job.setPrintingStartedAt(null);
             logService.add(job, JobStatus.FAILED, job.getErrorMessage(), job.getDevice());
+            if (job.getRetryCount() < job.getMaxRetries()) {
+                job.setRetryCount(job.getRetryCount() + 1);
+                job.setStatus(JobStatus.QUEUED);
+                job.setDevice(null);
+                job.setDispatchedAt(null);
+                job.setCompletedAt(null);
+                job.setNextRetryAt(now.plusSeconds(retryDelaySeconds));
+                logService.add(job, JobStatus.QUEUED, "Retry scheduled after print timeout", null);
+            } else {
+                job.setStatus(JobStatus.FAILED);
+                job.setCompletedAt(now);
+                job.setNextRetryAt(null);
+            }
         }
+    }
+
+    @Transactional
+    public int processDueRetries() {
+        List<PrintJob> due = jobs.findDueRetriesForUpdate(Instant.now());
+        for (PrintJob job : due) {
+            job.setNextRetryAt(null);
+            dispatchAfterCommit(job.getId(), job.getSellerId());
+        }
+        return due.size();
     }
 
     @Transactional(readOnly = true)
@@ -338,11 +466,31 @@ public class PrintJobService {
     private PrintJobResponse toResponse(PrintJob job) {
         return new PrintJobResponse(job.getId(), job.getSellerId(),
                 job.getDevice() == null ? null : job.getDevice().getId(), job.getOrderId(), job.getJobType(),
-                job.getPayloadJson(), job.getStatus(), job.getRetryCount(), job.getMaxRetries(), job.getErrorCode(),
+                job.getPayloadJson(), legacyStatus(job), job.getStatus(), job.getRetryCount(), job.getMaxRetries(), job.getErrorCode(),
                 job.getErrorMessage(), job.isOpenCashDrawer(), job.isCutPaper(), job.getCopies(), job.getCreatedAt(),
                 job.getUpdatedAt(), job.getDispatchedAt(), job.getPrintedAt(), job.getCompletedAt(),
                 job.getPrinter() == null ? null : job.getPrinter().getId(),
-                Base64.getEncoder().encodeToString(escPos.generate(job.getPayloadJson(), job.isCutPaper())));
+                Base64.getEncoder().encodeToString(escPos.generate(job.getPayloadJson(), job.isCutPaper())), job.getNextRetryAt());
+    }
+
+    private static JobStatus legacyStatus(PrintJob job) {
+        return switch (job.getStatus()) {
+            case QUEUED -> JobStatus.PENDING;
+            case SENT_TO_PRINTER -> job.getPrintingStartedAt() != null ? JobStatus.PRINTING
+                    : job.getPrinter() != null ? JobStatus.SENT_TO_DEVICE : JobStatus.DISPATCHED;
+            case PRINTED_CONFIRMED -> JobStatus.SUCCESS;
+            default -> job.getStatus();
+        };
+    }
+
+    private static JobStatus canonicalStatus(JobStatus status) {
+        if (status == null) return null;
+        return switch (status) {
+            case PENDING -> JobStatus.QUEUED;
+            case DISPATCHED, SENT_TO_DEVICE, PRINTING -> JobStatus.SENT_TO_PRINTER;
+            case SUCCESS -> JobStatus.PRINTED_CONFIRMED;
+            default -> status;
+        };
     }
 
     public record CreatedJob(PrintJobResponse job, boolean created) {

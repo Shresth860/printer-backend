@@ -13,6 +13,7 @@ import com.bizbitenow.printservice.printer.repository.PrinterRepository;
 import com.bizbitenow.printservice.security.DevicePrincipal;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -21,6 +22,8 @@ import java.util.UUID;
 
 @Service
 public class DeviceService {
+    @Value("${app.printers.stale-seconds:120}")
+    private long printerStaleSeconds = 120;
     private final AppDeviceRepository devices;
     private final PrinterRepository printers;
 
@@ -38,7 +41,7 @@ public class DeviceService {
         for (HeartbeatRequest.PrinterHeartbeat heartbeat : request.printers()) {
             printers.findByDeviceIdAndName(device.getId(), heartbeat.name()).ifPresent(printer ->
                     {
-                        printer.setLastStatus(heartbeat.status());
+                        printer.setLastStatus(normalizePrinterStatus(heartbeat.status()));
                         printer.setLastSeenAt(now);
                     });
         }
@@ -54,7 +57,7 @@ public class DeviceService {
             throw new BusinessException(HttpStatus.FORBIDDEN, "PRINTER_NOT_OWNED",
                     "Printer is not assigned to this device");
         }
-        printer.setLastStatus(request.status());
+        printer.setLastStatus(normalizePrinterStatus(request.status()));
         printer.setLastSeenAt(Instant.now());
     }
 
@@ -85,7 +88,8 @@ public class DeviceService {
             printer.setAddress(input.address());
             printer.setPaperWidthMm(input.paperWidthMm());
             printer.setDefaultPrinter(input.defaultPrinter());
-            printer.setLastStatus(input.status());
+            printer.setLastStatus(input.status() == null ? "OFFLINE" : normalizePrinterStatus(input.status()));
+            if (input.status() != null) printer.setLastSeenAt(Instant.now());
             printers.save(printer);
         }
         return printers.findByDeviceIdOrderByName(device.getId()).stream().map(DeviceService::printerResponse).toList();
@@ -101,6 +105,26 @@ public class DeviceService {
         Instant onlineThreshold = Instant.now().minusSeconds(120);
         return devices.findBySellerIdOrderByCreatedAtDesc(sellerId).stream()
                 .map(device -> deviceResponse(device, onlineThreshold)).toList();
+    }
+
+    @Transactional
+    public List<PrinterResponse> sellerPrinters(String sellerId) {
+        Instant threshold = Instant.now().minusSeconds(printerStaleSeconds);
+        printers.markStaleOffline(threshold);
+        return printers.findBySellerIdOrderByName(sellerId).stream().map(DeviceService::printerResponse).toList();
+    }
+
+    @Transactional
+    public int markStalePrintersOffline() {
+        return printers.markStaleOffline(Instant.now().minusSeconds(printerStaleSeconds));
+    }
+
+    private static String normalizePrinterStatus(String status) {
+        return switch (status) {
+            case "CONNECTED" -> "ONLINE";
+            case "DISCONNECTED" -> "OFFLINE";
+            default -> status;
+        };
     }
 
     @Transactional

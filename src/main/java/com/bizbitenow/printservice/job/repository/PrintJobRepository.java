@@ -38,7 +38,8 @@ public interface PrintJobRepository extends JpaRepository<PrintJob, UUID> {
 
     @Query(value = """
             SELECT * FROM print_job
-            WHERE seller_id = :sellerId AND status = 'PENDING'
+            WHERE seller_id = :sellerId AND status = 'QUEUED'
+              AND (next_retry_at IS NULL OR next_retry_at <= now())
               AND (device_id IS NULL OR device_id = :deviceId)
               AND ((:printerId IS NULL AND (printer_id IS NULL OR printer_id IN
                     (SELECT id FROM printer WHERE device_id = :deviceId)))
@@ -51,10 +52,14 @@ public interface PrintJobRepository extends JpaRepository<PrintJob, UUID> {
                              @Param("printerId") UUID printerId, @Param("limit") int limit);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select j from PrintJob j where j.status in ('DISPATCHED', 'SENT_TO_DEVICE') and j.dispatchedAt < :before")
+    @Query("select j from PrintJob j where j.status = 'SENT_TO_PRINTER' and j.printingStartedAt is null and j.dispatchedAt < :before")
     List<PrintJob> findStaleDispatchedForUpdate(@Param("before") Instant before);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select j from PrintJob j where j.status = 'PRINTING' and j.printingStartedAt < :before")
+    @Query("select j from PrintJob j where j.status = 'SENT_TO_PRINTER' and j.printingStartedAt < :before")
     List<PrintJob> findStalePrintingForUpdate(@Param("before") Instant before);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select j from PrintJob j where j.status = 'QUEUED' and j.nextRetryAt <= :now")
+    List<PrintJob> findDueRetriesForUpdate(@Param("now") Instant now);
 }

@@ -52,7 +52,7 @@ class PrintJobServiceTest {
     void stateMachineRejectsSkippingPrinting() {
         UUID jobId = UUID.randomUUID();
         AppDevice device = device(jobId, "seller");
-        PrintJob job = job(jobId, device, JobStatus.DISPATCHED);
+        PrintJob job = job(jobId, device, JobStatus.SENT_TO_PRINTER);
         when(deviceService.requireActive(device.getId())).thenReturn(device);
         when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
 
@@ -61,31 +61,69 @@ class PrintJobServiceTest {
                         new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null)));
 
         assertEquals(409, error.getStatus().value());
-        assertEquals(JobStatus.DISPATCHED, job.getStatus());
+        assertEquals(JobStatus.SENT_TO_PRINTER, job.getStatus());
     }
 
     @Test
     void stateMachineAllowsPrintingThenSuccess() {
         UUID jobId = UUID.randomUUID();
         AppDevice device = device(jobId, "seller");
-        PrintJob job = job(jobId, device, JobStatus.DISPATCHED);
+        PrintJob job = job(jobId, device, JobStatus.SENT_TO_PRINTER);
         when(deviceService.requireActive(device.getId())).thenReturn(device);
         when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         DevicePrincipal principal = new DevicePrincipal(device.getId(), "seller");
 
         service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.PRINTING, null, null));
-        assertEquals(JobStatus.PRINTING, job.getStatus());
-        service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null));
-        assertEquals(JobStatus.SUCCESS, job.getStatus());
+        assertEquals(JobStatus.SENT_TO_PRINTER, job.getStatus());
+        service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null, true, 42L, true));
+        assertEquals(JobStatus.PRINTED_CONFIRMED, job.getStatus());
         assertNotNull(job.getCompletedAt());
         assertNotNull(job.getPrintedAt());
+    }
+
+    @Test
+    void rejectsSuccessWithoutPrinterConfirmationEvidence() {
+        UUID jobId = UUID.randomUUID();
+        AppDevice device = device(jobId, "seller");
+        PrintJob job = job(jobId, device, JobStatus.SENT_TO_PRINTER);
+        when(deviceService.requireActive(device.getId())).thenReturn(device);
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.updateStatus(new DevicePrincipal(device.getId(), "seller"), jobId,
+                        new UpdateJobStatusRequest(JobStatus.PRINTED_CONFIRMED, null, null)));
+        assertEquals(400, error.getStatus().value());
+        assertEquals(JobStatus.SENT_TO_PRINTER, job.getStatus());
+    }
+
+    @Test
+    void duplicateSuccessCallbackIsIdempotentAndDoesNotReplaceEvidence() {
+        UUID jobId = UUID.randomUUID();
+        AppDevice device = device(jobId, "seller");
+        PrintJob job = job(jobId, device, JobStatus.PRINTED_CONFIRMED);
+        job.setPrinterConnected(true);
+        job.setBytesWritten(42L);
+        job.setFlushOk(true);
+        var printedAt = java.time.Instant.parse("2026-11-22T00:00:00Z");
+        job.setPrintedAt(printedAt);
+        when(deviceService.requireActive(device.getId())).thenReturn(device);
+        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
+
+        var response = service.updateStatus(new DevicePrincipal(device.getId(), "seller"), jobId,
+                new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null));
+
+        assertEquals(JobStatus.SUCCESS, response.status());
+        assertEquals(printedAt, job.getPrintedAt());
+        assertEquals(42L, job.getBytesWritten());
+        assertEquals(Boolean.TRUE, job.getPrinterConnected());
+        assertEquals(Boolean.TRUE, job.getFlushOk());
+        verify(logService, never()).add(any(), any(), anyString(), any());
     }
 
     @Test
     void deviceFailureRetriesThreeTimesThenRemainsFailed() {
         UUID jobId = UUID.randomUUID();
         AppDevice device = device(jobId, "seller");
-        PrintJob job = job(jobId, device, JobStatus.PRINTING);
+        PrintJob job = job(jobId, device, JobStatus.SENT_TO_PRINTER);
         when(deviceService.requireActive(device.getId())).thenReturn(device);
         when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
         DevicePrincipal principal = new DevicePrincipal(device.getId(), "seller");
@@ -97,9 +135,10 @@ class PrintJobServiceTest {
         assertEquals(JobStatus.PENDING, retry.status());
         assertEquals(1, retry.retryCount());
         assertEquals("Paper roll empty", retry.errorMessage());
+        assertNotNull(retry.nextRetryAt());
 
         job.setDevice(device);
-        job.setStatus(JobStatus.PRINTING);
+        job.setStatus(JobStatus.SENT_TO_PRINTER);
         job.setRetryCount(3);
         var terminal = service.updateStatus(principal, jobId,
                 new UpdateJobStatusRequest(JobStatus.FAILED, "PAPER_OUT", "Paper roll empty"));
@@ -109,15 +148,33 @@ class PrintJobServiceTest {
     }
 
     @Test
-    void stalePrintingJobsFailWithoutSuccess() {
+    void dueRetryIsReleasedForQueueProcessing() {
         UUID jobId = UUID.randomUUID();
-        PrintJob job = job(jobId, null, JobStatus.PRINTING);
+        PrintJob job = job(jobId, null, JobStatus.QUEUED);
+        job.setNextRetryAt(java.time.Instant.now().minusSeconds(1));
+        when(jobs.findDueRetriesForUpdate(any())).thenReturn(java.util.List.of(job));
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            assertEquals(1, service.processDueRetries());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        assertNull(job.getNextRetryAt());
+        assertEquals(JobStatus.QUEUED, job.getStatus());
+    }
+
+    @Test
+    void stalePrintingJobsScheduleRetryWithoutMarkingSuccess() {
+        UUID jobId = UUID.randomUUID();
+        PrintJob job = job(jobId, null, JobStatus.SENT_TO_PRINTER);
         when(jobs.findStalePrintingForUpdate(any())).thenReturn(java.util.List.of(job));
 
         service.failTimedOutPrintingJobs();
 
-        assertEquals(JobStatus.FAILED, job.getStatus());
+        assertEquals(JobStatus.QUEUED, job.getStatus());
+        assertEquals(1, job.getRetryCount());
         assertEquals("PRINT_TIMEOUT", job.getErrorCode());
+        assertNotNull(job.getNextRetryAt());
         assertNull(job.getPrintedAt());
         verify(logService).add(job, JobStatus.FAILED,
                 "Device did not confirm the print within 60 seconds", null);
@@ -131,7 +188,7 @@ class PrintJobServiceTest {
         CreatePrintJobRequest request = new CreatePrintJobRequest("seller", "order", com.bizbitenow.printservice.common.JobType.RECEIPT,
                 payload, false, true, 1, "same-key");
         UUID id = UUID.randomUUID();
-        PrintJob existing = job(id, null, JobStatus.PENDING);
+        PrintJob existing = job(id, null, JobStatus.QUEUED);
         existing.setSellerId("seller");
         existing.setIdempotencyKey("same-key");
         when(jdbc.query(anyString(), ArgumentMatchers.<ResultSetExtractor<UUID>>any(), any(Object[].class)))

@@ -43,6 +43,12 @@ app:
     credentials: ${FIREBASE_CREDENTIALS:}
   jobs:
     archive-enabled: ${JOB_ARCHIVE_ENABLED:true}
+    max-retries: ${JOB_MAX_RETRIES:3}
+    retry-delay-seconds: ${JOB_RETRY_DELAY_SECONDS:30}
+    retry-scan-delay-ms: ${JOB_RETRY_SCAN_DELAY_MS:5000}
+  printers:
+    stale-seconds: ${PRINTER_STALE_SECONDS:120}
+    stale-scan-delay-ms: ${PRINTER_STALE_SCAN_DELAY_MS:30000}
 springdoc:
   swagger-ui:
     path: /swagger-ui

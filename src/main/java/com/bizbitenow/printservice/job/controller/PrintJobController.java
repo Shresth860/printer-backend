@@ -4,6 +4,8 @@ import com.bizbitenow.printservice.common.BusinessException;
 import com.bizbitenow.printservice.common.JobStatus;
 import com.bizbitenow.printservice.job.dto.CreatePrintJobRequest;
 import com.bizbitenow.printservice.job.dto.PrintJobResponse;
+import com.bizbitenow.printservice.job.dto.OfflineJobBatchRequest;
+import com.bizbitenow.printservice.job.dto.OfflineJobBatchResponse;
 import com.bizbitenow.printservice.job.dto.UpdateJobStatusRequest;
 import com.bizbitenow.printservice.job.service.PrintJobService;
 import com.bizbitenow.printservice.security.DevicePrincipal;
@@ -100,6 +102,13 @@ public class PrintJobController {
     public PrintJobResponse updateStatus(@AuthenticationPrincipal DevicePrincipal principal, @PathVariable UUID id,
                                          @Valid @RequestBody UpdateJobStatusRequest request) {
         return jobService.updateStatus(principal, id, request);
+    }
+
+    @PostMapping("/sync-results")
+    @SecurityRequirement(name = "deviceBearer")
+    public OfflineJobBatchResponse syncResults(@AuthenticationPrincipal DevicePrincipal principal,
+                                                @Valid @RequestBody OfflineJobBatchRequest request) {
+        return jobService.syncOfflineResults(principal, request);
     }
 
     @GetMapping("/history")

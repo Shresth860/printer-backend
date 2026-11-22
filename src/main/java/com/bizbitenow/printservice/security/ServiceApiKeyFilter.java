@@ -73,6 +73,8 @@ public class ServiceApiKeyFilter extends OncePerRequestFilter {
         if (path.matches("/api/print-jobs/[^/]+") && "GET".equals(method)) return true;
         if (path.matches("/api/print-jobs/[^/]+/(cancel|retry)") && "POST".equals(method)) return true;
         if (path.matches("/api/v1/sellers/[^/]+/devices") && "GET".equals(method)) return true;
-        return path.matches("/api/v1/devices/[^/]+") && "DELETE".equals(method);
+        if (path.matches("/api/v1/sellers/[^/]+/printers") && "GET".equals(method)) return true;
+        return !path.equals("/api/v1/devices/me")
+                && path.matches("/api/v1/devices/[^/]+") && "DELETE".equals(method);
     }
 }

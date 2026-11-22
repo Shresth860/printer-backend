@@ -86,6 +86,9 @@ public class SecurityConfig {
                                 "/api/print-jobs/*/status"
                         ).hasAuthority("ROLE_DEVICE")
 
+                        .requestMatchers(HttpMethod.POST, "/api/v1/jobs/sync-results")
+                        .hasAuthority("ROLE_DEVICE")
+
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/print-jobs/pending",
@@ -107,7 +110,8 @@ public class SecurityConfig {
                                 HttpMethod.GET,
                                 "/api/v1/jobs",
                                 "/api/v1/jobs/**",
-                                "/api/v1/sellers/*/devices"
+                                "/api/v1/sellers/*/devices",
+                                "/api/v1/sellers/*/printers"
                         ).hasAuthority("ROLE_SERVICE")
 
                         .requestMatchers(

@@ -46,21 +46,28 @@ class PairingServiceTest {
     }
 
     @Test
-    void pairingCodeCanBeUsedOnlyOnce() {
+    void pairingReplayReturnsSameDeviceWithoutCreatingDuplicate() {
         PairingCode code = new PairingCode();
         code.setSellerId("seller-1");
-        when(pairingCodes.findUsableForUpdate(eq(pairingCodeHasher.hashCode(RAW_CODE)), any()))
-                .thenReturn(Optional.of(code), Optional.empty());
+        code.setExpiresAt(Instant.now().plusSeconds(120));
+        when(pairingCodes.findByCodeHashForUpdate(pairingCodeHasher.hashCode(RAW_CODE))).thenReturn(Optional.of(code));
 
-        assertEquals("seller-1", service.pair(request(RAW_CODE)).sellerId());
-        assertThrows(RuntimeException.class, () -> service.pair(request(RAW_CODE)));
+        var first = service.pair(request(RAW_CODE));
+        var pairedDevice = org.mockito.ArgumentCaptor.forClass(AppDevice.class);
+        verify(devices).save(pairedDevice.capture());
+        when(devices.findActiveForUpdate(first.deviceId())).thenReturn(Optional.of(pairedDevice.getValue()));
+        var replay = service.pair(request(RAW_CODE));
+        assertEquals("seller-1", first.sellerId());
+        assertEquals(first.deviceId(), replay.deviceId());
+        assertNotEquals(first.refreshToken(), replay.refreshToken());
+        assertEquals(first.deviceId(), code.getPairedDeviceId());
         verify(devices, times(1)).save(any(AppDevice.class));
-        verify(pairingCodes, times(2)).findUsableForUpdate(eq(pairingCodeHasher.hashCode(RAW_CODE)), any());
+        verify(devices).findActiveForUpdate(first.deviceId());
     }
 
     @Test
     void expiredOrUnknownCodeIsRejected() {
-        when(pairingCodes.findUsableForUpdate(eq(pairingCodeHasher.hashCode(RAW_CODE)), any()))
+        when(pairingCodes.findByCodeHashForUpdate(pairingCodeHasher.hashCode(RAW_CODE)))
                 .thenReturn(Optional.empty());
 
         assertThrows(RuntimeException.class, () -> service.pair(request(RAW_CODE)));

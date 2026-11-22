@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    hikari:
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:10000}
+      validation-timeout: ${DB_VALIDATION_TIMEOUT_MS:5000}
+      initialization-fail-timeout: ${DB_INITIALIZATION_FAIL_TIMEOUT_MS:10000}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+server:
+  port: ${PORT:8080}
+  connection-timeout: ${SERVER_CONNECTION_TIMEOUT:20s}
+  tomcat:
+    connection-timeout: ${SERVER_CONNECTION_TIMEOUT:20s}
+app:
+  security:
+    jwt-secret: ${JWT_SECRET}
+    service-api-key: ${SERVICE_API_KEY}
+  firebase:
+    credentials: ${FIREBASE_CREDENTIALS:}

@@ -94,7 +94,7 @@ class PrintServiceIntegrationTest {
         jobService.updateStatus(principal, jobId, new UpdateJobStatusRequest(
                 com.bizbitenow.printservice.common.JobStatus.PRINTING, null, null));
         var success = jobService.updateStatus(principal, jobId, new UpdateJobStatusRequest(
-                com.bizbitenow.printservice.common.JobStatus.SUCCESS, null, null));
+                com.bizbitenow.printservice.common.JobStatus.SUCCESS, null, null, true, 128L, true));
         assertEquals("SUCCESS", success.status().name());
     }
 
@@ -148,14 +148,20 @@ class PrintServiceIntegrationTest {
         String request = """
                 {"code":"%s","deviceName":"Secure printer","androidVersion":"14","appVersion":"1.0.0"}
                 """.formatted(pairingCode.code());
-        mockMvc.perform(post("/api/v1/auth/pair").contentType(MediaType.APPLICATION_JSON).content(request))
-                .andExpect(status().isOk());
-        String reuseError = mockMvc.perform(post("/api/v1/auth/pair")
+        String originalPair = mockMvc.perform(post("/api/v1/auth/pair").contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        String replay = mockMvc.perform(post("/api/v1/auth/pair")
                         .contentType(MediaType.APPLICATION_JSON).content(request))
-                .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")))
+                .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
-        assertFalse(reuseError.contains(pairingCode.code()));
+        assertEquals(1, jdbc.queryForObject("select count(*) from app_device where seller_id = ?",
+                Integer.class, "seller-pairing-security"));
+        assertEquals(objectMapper.readTree(originalPair).get("deviceId").asText(),
+                objectMapper.readTree(replay).get("deviceId").asText());
+        String changedIdentityRequest = request.replace("Secure printer", "Different printer");
+        mockMvc.perform(post("/api/v1/auth/pair").contentType(MediaType.APPLICATION_JSON).content(changedIdentityRequest))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")));
 
         var expiredCode = pairingService.createCode("seller-expired-code");
         jdbc.update("update pairing_code set expires_at = now() - interval '1 second' where code_hash = ?",
@@ -169,6 +175,26 @@ class PrintServiceIntegrationTest {
                 .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")))
                 .andReturn().getResponse().getContentAsString();
         assertFalse(expiryError.contains(expiredCode.code()));
+    }
+
+    @Test
+    void pairAndRefreshWorkThroughHttpEndpoints() throws Exception {
+        var code = pairingService.createCode("seller-pair-refresh-http");
+        String pairResponse = mockMvc.perform(post("/api/v1/auth/pair")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"code":"%s","deviceName":"HTTP setup printer","androidVersion":"14","appVersion":"1.0.0"}
+                                """.formatted(code.code())))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        String refreshToken = objectMapper.readTree(pairResponse).get("refreshToken").asText();
+
+        mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"refreshToken\":\"" + refreshToken + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accessToken").isNotEmpty())
+                .andExpect(jsonPath("$.refreshToken").isNotEmpty());
     }
 
     @Test
@@ -244,6 +270,11 @@ class PrintServiceIntegrationTest {
 
     @Test
     void controllerReturnsExpectedAuthenticationAndBusinessErrors() throws Exception {
+        mockMvc.perform(post("/api/v1/auth/pair")
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code", is("VALIDATION_ERROR")));
+
         mockMvc.perform(get("/api/v1/jobs/pending"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.code", is("UNAUTHORIZED")));
@@ -306,6 +337,45 @@ class PrintServiceIntegrationTest {
     }
 
     @Test
+    void offlineBatchSyncDeduplicatesAndDoesNotApplyOlderClientState() throws Exception {
+        TokenResponse device = pair("seller-offline-sync", "Offline printer");
+        var created = jobService.create(new CreatePrintJobRequest("seller-offline-sync", "offline-order",
+                JobType.TEST, validPayload(), false, true, 1, "offline-sync-job"));
+        var principal = new com.bizbitenow.printservice.security.DevicePrincipal(device.deviceId(), device.sellerId());
+        jobService.claim(principal, 1);
+        String token = jwtService.issueAccessToken(device.deviceId(), device.sellerId());
+        UUID eventId = UUID.randomUUID();
+        String eventTime = java.time.Instant.now().plusSeconds(2).toString();
+        String body = """
+                {"results":[{"clientId":"%s","jobId":"%s","status":"PRINTED_CONFIRMED",
+                "clientTimestamp":"%s","connected":true,"bytesWritten":64,"flushOk":true}]}
+                """.formatted(eventId, created.job().id(), eventTime);
+        mockMvc.perform(post("/api/v1/jobs/sync-results").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results[0].applied", is(true)))
+                .andExpect(jsonPath("$.results[0].lifecycleStatus", is("PRINTED_CONFIRMED")));
+        mockMvc.perform(post("/api/v1/jobs/sync-results").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results[0].duplicate", is(true)))
+                .andExpect(jsonPath("$.results[0].applied", is(false)));
+
+        String olderEvent = """
+                {"results":[{"clientId":"%s","jobId":"%s","status":"FAILED",
+                "clientTimestamp":"%s","errorCode":"OFFLINE","errorMessage":"stale result"}]}
+                """.formatted(UUID.randomUUID(), created.job().id(),
+                java.time.Instant.parse(eventTime).minusSeconds(1));
+        mockMvc.perform(post("/api/v1/jobs/sync-results").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(olderEvent))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results[0].applied", is(false)))
+                .andExpect(jsonPath("$.results[0].lifecycleStatus", is("PRINTED_CONFIRMED")));
+        assertEquals("PRINTED_CONFIRMED", jdbc.queryForObject("select status from print_job where id = ?",
+                String.class, created.job().id()));
+    }
+
+    @Test
     void printerApiDeliversEscPosAndRequiresDeviceConfirmationForSuccess() throws Exception {
         TokenResponse device = pair("seller-real-print", "Real print device");
         String accessToken = jwtService.issueAccessToken(device.deviceId(), device.sellerId());
@@ -327,9 +397,15 @@ class PrintServiceIntegrationTest {
                         .content("{\"status\":\"CONNECTED\"}"))
                 .andExpect(status().isOk());
         assertTrue(jdbc.queryForObject("""
-                select last_status = 'CONNECTED' and last_seen_at is not null
+                select last_status = 'ONLINE' and last_seen_at is not null
                 from printer where id = ?
                 """, Boolean.class, printerId));
+        jdbc.update("update printer set last_seen_at = now() - interval '10 minutes' where id = ?", printerId);
+        mockMvc.perform(get("/api/v1/sellers/{sellerId}/printers", "seller-real-print")
+                        .header("X-Service-Key", SERVICE_KEY))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].lastStatus", is("OFFLINE")))
+                .andExpect(jsonPath("$[0].lastSeenAt").isNotEmpty());
 
         String payload = validPayload().toString();
         String createRequest = "{\"sellerId\":\"seller-real-print\",\"orderId\":\"order-real-print\","
@@ -365,10 +441,16 @@ class PrintServiceIntegrationTest {
         mockMvc.perform(patch("/api/print-jobs/{id}/status", jobId)
                         .header("Authorization", "Bearer " + accessToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"status\":\"SUCCESS\"}"))
+                        .content("{\"status\":\"SUCCESS\",\"connected\":true,\"bytesWritten\":128,\"flushOk\":true}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status", is("SUCCESS")))
                 .andExpect(jsonPath("$.printedAt").isNotEmpty());
+        assertEquals(Boolean.TRUE, jdbc.queryForObject(
+                "select printer_connected from print_job where id = ?", Boolean.class, UUID.fromString(jobId)));
+        assertEquals(128L, jdbc.queryForObject(
+                "select bytes_written from print_job where id = ?", Long.class, UUID.fromString(jobId)));
+        assertEquals(Boolean.TRUE, jdbc.queryForObject(
+                "select flush_ok from print_job where id = ?", Boolean.class, UUID.fromString(jobId)));
         mockMvc.perform(get("/api/print-jobs/history").param("page", "0").param("size", "10")
                         .header("Authorization", "Bearer " + accessToken))
                 .andExpect(status().isOk())

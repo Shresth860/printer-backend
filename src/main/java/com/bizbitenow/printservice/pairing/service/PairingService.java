@@ -53,9 +53,15 @@ public class PairingService {
     @Transactional
     public TokenResponse pair(PairDeviceRequest request) {
         Instant now = Instant.now();
-        PairingCode pairingCode = pairingCodes.findUsableForUpdate(pairingCodeHasher.hashCode(request.code()), now)
+        PairingCode pairingCode = pairingCodes.findByCodeHashForUpdate(pairingCodeHasher.hashCode(request.code()))
                 .orElseThrow(() -> new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY,
                         "INVALID_PAIRING_CODE", "Pairing code is invalid, expired, or already used"));
+        if (pairingCode.getUsedAt() != null) {
+            return replayPairing(pairingCode, request, now);
+        }
+        if (!pairingCode.getExpiresAt().isAfter(now)) {
+            throw invalidPairingCode();
+        }
         pairingCode.setUsedAt(now);
         AppDevice device = new AppDevice();
         device.setSellerId(pairingCode.getSellerId());
@@ -69,7 +75,30 @@ public class PairingService {
         device.setRefreshTokenHash(hash(refreshToken));
         device.setRefreshTokenExpiresAt(now.plus(REFRESH_TTL));
         devices.save(device);
+        pairingCode.setPairedDeviceId(device.getId());
         return tokenResponse(device, refreshToken, now);
+    }
+
+    private TokenResponse replayPairing(PairingCode pairingCode, PairDeviceRequest request, Instant now) {
+        if (pairingCode.getPairedDeviceId() == null) throw invalidPairingCode();
+        AppDevice device = devices.findActiveForUpdate(pairingCode.getPairedDeviceId())
+                .orElseThrow(PairingService::invalidPairingCode);
+        if (!device.getDeviceName().equals(request.deviceName().trim())
+                || !device.getAndroidVersion().equals(request.androidVersion())
+                || !device.getAppVersion().equals(request.appVersion())) {
+            throw invalidPairingCode();
+        }
+        String refreshToken = newRefreshToken();
+        device.setRefreshTokenHash(hash(refreshToken));
+        device.setRefreshTokenExpiresAt(now.plus(REFRESH_TTL));
+        device.setLastSeenAt(now);
+        device.setFcmToken(blankToNull(request.fcmToken()));
+        return tokenResponse(device, refreshToken, now);
+    }
+
+    private static BusinessException invalidPairingCode() {
+        return new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY,
+                "INVALID_PAIRING_CODE", "Pairing code is invalid, expired, or already used");
     }
 
     @Transactional

@@ -52,8 +52,12 @@ public class PrintJob {
     @Column(name = "payload_json", nullable = false, columnDefinition = "jsonb")
     private JsonNode payloadJson;
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 16)
-    private JobStatus status = JobStatus.PENDING;
+    @Column(nullable = false, length = 32)
+    private JobStatus status = JobStatus.QUEUED;
+    @Column(name = "next_retry_at")
+    private Instant nextRetryAt;
+    @Column(name = "client_updated_at")
+    private Instant clientUpdatedAt;
     @Column(name = "retry_count", nullable = false)
     private int retryCount;
     @Column(name = "max_retries", nullable = false)
@@ -64,6 +68,12 @@ public class PrintJob {
     private String errorCode;
     @Column(name = "error_message", length = 1000)
     private String errorMessage;
+    @Column(name = "printer_connected")
+    private Boolean printerConnected;
+    @Column(name = "bytes_written")
+    private Long bytesWritten;
+    @Column(name = "flush_ok")
+    private Boolean flushOk;
     @Column(name = "open_cash_drawer", nullable = false)
     private boolean openCashDrawer;
     @Column(name = "cut_paper", nullable = false)

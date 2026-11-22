@@ -1,0 +1,233 @@
+diff --git a/src/main/java/com/bizbitenow/printservice/common/ApiError.java b/src/main/java/com/bizbitenow/printservice/common/ApiError.java
+index 457bdc0..52937bd 100644
+--- a/src/main/java/com/bizbitenow/printservice/common/ApiError.java
++++ b/src/main/java/com/bizbitenow/printservice/common/ApiError.java
+@@ -2,5 +2,5 @@ package com.bizbitenow.printservice.common;
+ 
+ import java.time.Instant;
+ 
+-public record ApiError(Instant timestamp, int status, String code, String message, String path) {
++public record ApiError(Instant timestamp, int status, String error, String message, String path) {
+ }
+diff --git a/src/main/java/com/bizbitenow/printservice/common/GlobalExceptionHandler.java b/src/main/java/com/bizbitenow/printservice/common/GlobalExceptionHandler.java
+index 8534be0..e755f4a 100644
+--- a/src/main/java/com/bizbitenow/printservice/common/GlobalExceptionHandler.java
++++ b/src/main/java/com/bizbitenow/printservice/common/GlobalExceptionHandler.java
+@@ -30,7 +30,7 @@ public class GlobalExceptionHandler {
+                 ? validation.getBindingResult().getFieldErrors().stream()
+                 .map(e -> e.getField() + ": " + e.getDefaultMessage()).findFirst().orElse("Invalid request")
+                 : "Invalid request";
+-        return response(HttpStatus.UNPROCESSABLE_ENTITY, "VALIDATION_ERROR", message, request);
++        return response(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", message, request);
+     }
+ 
+     @ExceptionHandler(BadCredentialsException.class)
+diff --git a/src/main/java/com/bizbitenow/printservice/config/SecurityConfig.java b/src/main/java/com/bizbitenow/printservice/config/SecurityConfig.java
+index b209f99..ce71bca 100644
+--- a/src/main/java/com/bizbitenow/printservice/config/SecurityConfig.java
++++ b/src/main/java/com/bizbitenow/printservice/config/SecurityConfig.java
+@@ -206,7 +206,7 @@ public class SecurityConfig {
+                 Map.of(
+                         "timestamp", Instant.now(),
+                         "status", status.value(),
+-                        "code", code,
++                        "error", code,
+                         "message", message,
+                         "path", request.getRequestURI()
+                 )
+diff --git a/src/main/java/com/bizbitenow/printservice/job/dto/UpdateJobStatusRequest.java b/src/main/java/com/bizbitenow/printservice/job/dto/UpdateJobStatusRequest.java
+index 32111c8..2d4736e 100644
+--- a/src/main/java/com/bizbitenow/printservice/job/dto/UpdateJobStatusRequest.java
++++ b/src/main/java/com/bizbitenow/printservice/job/dto/UpdateJobStatusRequest.java
+@@ -6,5 +6,11 @@ import jakarta.validation.constraints.Size;
+ 
+ public record UpdateJobStatusRequest(@NotNull JobStatus status,
+                                     @Size(max = 120) String errorCode,
+-                                    @Size(max = 1000) String errorMessage) {
++                                     @Size(max = 1000) String errorMessage,
++                                     Boolean connected,
++                                     Long bytesWritten,
++                                     Boolean flushOk) {
++    public UpdateJobStatusRequest(JobStatus status, String errorCode, String errorMessage) {
++        this(status, errorCode, errorMessage, null, null, null);
++    }
+ }
+diff --git a/src/main/java/com/bizbitenow/printservice/job/service/PrintJobService.java b/src/main/java/com/bizbitenow/printservice/job/service/PrintJobService.java
+index 8631866..b9b26bb 100644
+--- a/src/main/java/com/bizbitenow/printservice/job/service/PrintJobService.java
++++ b/src/main/java/com/bizbitenow/printservice/job/service/PrintJobService.java
+@@ -183,11 +183,20 @@ public class PrintJobService {
+         if (job.getDevice() == null || !job.getDevice().getId().equals(device.getId())) {
+             throw new BusinessException(HttpStatus.FORBIDDEN, "JOB_NOT_OWNED", "Job is not assigned to this device");
+         }
++        if (job.getStatus() == request.status() && (request.status() == JobStatus.SUCCESS || request.status() == JobStatus.FAILED)) {
++            return toResponse(job);
++        }
+         boolean legal = ((job.getStatus() == JobStatus.DISPATCHED || job.getStatus() == JobStatus.SENT_TO_DEVICE)
+                 && request.status() == JobStatus.PRINTING)
+                 || (job.getStatus() == JobStatus.PRINTING
+                 && (request.status() == JobStatus.SUCCESS || request.status() == JobStatus.FAILED));
+         if (!legal) throw conflict("Illegal job status transition");
++        if (request.status() == JobStatus.SUCCESS &&
++                (!Boolean.TRUE.equals(request.connected()) || request.bytesWritten() == null || request.bytesWritten() <= 0
++                        || !Boolean.TRUE.equals(request.flushOk()))) {
++            throw new BusinessException(HttpStatus.BAD_REQUEST, "PRINT_CONFIRMATION_REQUIRED",
++                    "SUCCESS requires connected=true, bytesWritten>0, and flushOk=true");
++        }
+         Instant now = Instant.now();
+         if (request.status() == JobStatus.PRINTING) {
+             job.setStatus(JobStatus.PRINTING);
+diff --git a/src/main/java/com/bizbitenow/printservice/security/JwtAuthFilter.java b/src/main/java/com/bizbitenow/printservice/security/JwtAuthFilter.java
+index f1bde31..dc4d34c 100644
+--- a/src/main/java/com/bizbitenow/printservice/security/JwtAuthFilter.java
++++ b/src/main/java/com/bizbitenow/printservice/security/JwtAuthFilter.java
+@@ -43,7 +43,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
+                 response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                 objectMapper.writeValue(response.getOutputStream(), Map.of(
+-                        "timestamp", Instant.now(), "status", 401, "code", "UNAUTHORIZED",
++                        "timestamp", Instant.now(), "status", 401, "error", "UNAUTHORIZED",
+                         "message", "Authentication failed", "path", request.getRequestURI()));
+                 return;
+             }
+diff --git a/src/main/java/com/bizbitenow/printservice/security/ServiceApiKeyFilter.java b/src/main/java/com/bizbitenow/printservice/security/ServiceApiKeyFilter.java
+index cf3ea32..b9dbd3e 100644
+--- a/src/main/java/com/bizbitenow/printservice/security/ServiceApiKeyFilter.java
++++ b/src/main/java/com/bizbitenow/printservice/security/ServiceApiKeyFilter.java
+@@ -73,6 +73,7 @@ public class ServiceApiKeyFilter extends OncePerRequestFilter {
+         if (path.matches("/api/print-jobs/[^/]+") && "GET".equals(method)) return true;
+         if (path.matches("/api/print-jobs/[^/]+/(cancel|retry)") && "POST".equals(method)) return true;
+         if (path.matches("/api/v1/sellers/[^/]+/devices") && "GET".equals(method)) return true;
+-        return path.matches("/api/v1/devices/[^/]+") && "DELETE".equals(method);
++        return !path.equals("/api/v1/devices/me")
++                && path.matches("/api/v1/devices/[^/]+") && "DELETE".equals(method);
+     }
+ }
+diff --git a/src/test/java/com/bizbitenow/printservice/PrintServiceIntegrationTest.java b/src/test/java/com/bizbitenow/printservice/PrintServiceIntegrationTest.java
+index 7551574..b37ad97 100644
+--- a/src/test/java/com/bizbitenow/printservice/PrintServiceIntegrationTest.java
++++ b/src/test/java/com/bizbitenow/printservice/PrintServiceIntegrationTest.java
+@@ -94,7 +94,7 @@ class PrintServiceIntegrationTest {
+         jobService.updateStatus(principal, jobId, new UpdateJobStatusRequest(
+                 com.bizbitenow.printservice.common.JobStatus.PRINTING, null, null));
+         var success = jobService.updateStatus(principal, jobId, new UpdateJobStatusRequest(
+-                com.bizbitenow.printservice.common.JobStatus.SUCCESS, null, null));
++                com.bizbitenow.printservice.common.JobStatus.SUCCESS, null, null, true, 128L, true));
+         assertEquals("SUCCESS", success.status().name());
+     }
+ 
+@@ -153,7 +153,7 @@ class PrintServiceIntegrationTest {
+         String reuseError = mockMvc.perform(post("/api/v1/auth/pair")
+                         .contentType(MediaType.APPLICATION_JSON).content(request))
+                 .andExpect(status().isUnprocessableEntity())
+-                .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")))
++                .andExpect(jsonPath("$.error", is("INVALID_PAIRING_CODE")))
+                 .andReturn().getResponse().getContentAsString();
+         assertFalse(reuseError.contains(pairingCode.code()));
+ 
+@@ -166,7 +166,7 @@ class PrintServiceIntegrationTest {
+         String expiryError = mockMvc.perform(post("/api/v1/auth/pair")
+                         .contentType(MediaType.APPLICATION_JSON).content(expiredRequest))
+                 .andExpect(status().isUnprocessableEntity())
+-                .andExpect(jsonPath("$.code", is("INVALID_PAIRING_CODE")))
++                .andExpect(jsonPath("$.error", is("INVALID_PAIRING_CODE")))
+                 .andReturn().getResponse().getContentAsString();
+         assertFalse(expiryError.contains(expiredCode.code()));
+     }
+@@ -246,19 +246,19 @@ class PrintServiceIntegrationTest {
+     void controllerReturnsExpectedAuthenticationAndBusinessErrors() throws Exception {
+         mockMvc.perform(get("/api/v1/jobs/pending"))
+                 .andExpect(status().isUnauthorized())
+-                .andExpect(jsonPath("$.code", is("UNAUTHORIZED")));
++                .andExpect(jsonPath("$.error", is("UNAUTHORIZED")));
+ 
+         mockMvc.perform(get("/api/v1/jobs/{id}", UUID.randomUUID())
+                         .header("X-Service-Key", SERVICE_KEY))
+                 .andExpect(status().isNotFound())
+-                .andExpect(jsonPath("$.code", is("JOB_NOT_FOUND")));
++                .andExpect(jsonPath("$.error", is("JOB_NOT_FOUND")));
+ 
+         mockMvc.perform(post("/api/v1/jobs")
+                         .header("X-Service-Key", SERVICE_KEY)
+                         .contentType(MediaType.APPLICATION_JSON)
+                         .content(createJobJson("bad-payload", "{\"paperWidthMm\":40,\"blocks\":[]}")))
+                 .andExpect(status().isUnprocessableEntity())
+-                .andExpect(jsonPath("$.code", is("INVALID_PAYLOAD")));
++                .andExpect(jsonPath("$.error", is("INVALID_PAYLOAD")));
+ 
+         String jobId = createJobOverHttp("cancel-test", validPayload().toString());
+         mockMvc.perform(post("/api/v1/jobs/{id}/cancel", jobId)
+@@ -267,7 +267,7 @@ class PrintServiceIntegrationTest {
+         mockMvc.perform(post("/api/v1/jobs/{id}/cancel", jobId)
+                         .header("X-Service-Key", SERVICE_KEY))
+                 .andExpect(status().isConflict())
+-                .andExpect(jsonPath("$.code", is("INVALID_JOB_STATE")));
++                .andExpect(jsonPath("$.error", is("INVALID_JOB_STATE")));
+ 
+         TokenResponse owner = pair("seller-owner", "Owner device");
+         TokenResponse other = pair("seller-owner", "Other device");
+@@ -279,7 +279,7 @@ class PrintServiceIntegrationTest {
+                         .contentType(MediaType.APPLICATION_JSON)
+                         .content("{\"status\":\"PRINTING\"}"))
+                 .andExpect(status().isForbidden())
+-                .andExpect(jsonPath("$.code", is("JOB_NOT_OWNED")));
++                .andExpect(jsonPath("$.error", is("JOB_NOT_OWNED")));
+     }
+ 
+     @Test
+@@ -365,7 +365,7 @@ class PrintServiceIntegrationTest {
+         mockMvc.perform(patch("/api/print-jobs/{id}/status", jobId)
+                         .header("Authorization", "Bearer " + accessToken)
+                         .contentType(MediaType.APPLICATION_JSON)
+-                        .content("{\"status\":\"SUCCESS\"}"))
++                        .content("{\"status\":\"SUCCESS\",\"connected\":true,\"bytesWritten\":128,\"flushOk\":true}"))
+                 .andExpect(status().isOk())
+                 .andExpect(jsonPath("$.status", is("SUCCESS")))
+                 .andExpect(jsonPath("$.printedAt").isNotEmpty());
+@@ -385,12 +385,12 @@ class PrintServiceIntegrationTest {
+                         .header("Authorization", "Bearer " + accessToken)
+                         .header("X-Service-Key", SERVICE_KEY))
+                 .andExpect(status().isForbidden())
+-                .andExpect(jsonPath("$.code", is("FORBIDDEN")));
++                .andExpect(jsonPath("$.error", is("FORBIDDEN")));
+ 
+         mockMvc.perform(get("/api/v1/jobs/pending")
+                         .header("X-Service-Key", SERVICE_KEY))
+                 .andExpect(status().isForbidden())
+-                .andExpect(jsonPath("$.code", is("FORBIDDEN")));
++                .andExpect(jsonPath("$.error", is("FORBIDDEN")));
+     }
+ 
+     @Test
+diff --git a/src/test/java/com/bizbitenow/printservice/job/service/PrintJobServiceTest.java b/src/test/java/com/bizbitenow/printservice/job/service/PrintJobServiceTest.java
+index 662aba5..9535755 100644
+--- a/src/test/java/com/bizbitenow/printservice/job/service/PrintJobServiceTest.java
++++ b/src/test/java/com/bizbitenow/printservice/job/service/PrintJobServiceTest.java
+@@ -75,12 +75,26 @@ class PrintJobServiceTest {
+ 
+         service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.PRINTING, null, null));
+         assertEquals(JobStatus.PRINTING, job.getStatus());
+-        service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null));
++        service.updateStatus(principal, jobId, new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null, true, 42L, true));
+         assertEquals(JobStatus.SUCCESS, job.getStatus());
+         assertNotNull(job.getCompletedAt());
+         assertNotNull(job.getPrintedAt());
+     }
+ 
++    @Test
++    void rejectsSuccessWithoutPrinterConfirmationEvidence() {
++        UUID jobId = UUID.randomUUID();
++        AppDevice device = device(jobId, "seller");
++        PrintJob job = job(jobId, device, JobStatus.PRINTING);
++        when(deviceService.requireActive(device.getId())).thenReturn(device);
++        when(jobs.findByIdForUpdate(jobId)).thenReturn(Optional.of(job));
++        BusinessException error = assertThrows(BusinessException.class,
++                () -> service.updateStatus(new DevicePrincipal(device.getId(), "seller"), jobId,
++                        new UpdateJobStatusRequest(JobStatus.SUCCESS, null, null)));
++        assertEquals(400, error.getStatus().value());
++        assertEquals(JobStatus.PRINTING, job.getStatus());
++    }
++
+     @Test
+     void deviceFailureRetriesThreeTimesThenRemainsFailed() {
+         UUID jobId = UUID.randomUUID();
