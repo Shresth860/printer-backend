@@ -58,6 +58,8 @@ public class PrintJob {
     private Instant nextRetryAt;
     @Column(name = "client_updated_at")
     private Instant clientUpdatedAt;
+    @Column(name = "device_reported_at")
+    private Instant deviceReportedAt;
     @Column(name = "retry_count", nullable = false)
     private int retryCount;
     @Column(name = "max_retries", nullable = false)

@@ -52,11 +52,11 @@ public interface PrintJobRepository extends JpaRepository<PrintJob, UUID> {
                              @Param("printerId") UUID printerId, @Param("limit") int limit);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select j from PrintJob j where j.status = 'SENT_TO_PRINTER' and j.printingStartedAt is null and j.dispatchedAt < :before")
+    @Query("select j from PrintJob j where j.status = 'SENT_TO_PRINTER' and j.deviceReportedAt is null and j.printingStartedAt is null and j.dispatchedAt < :before")
     List<PrintJob> findStaleDispatchedForUpdate(@Param("before") Instant before);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select j from PrintJob j where j.status = 'SENT_TO_PRINTER' and j.printingStartedAt < :before")
+    @Query("select j from PrintJob j where j.status = 'SENT_TO_PRINTER' and j.deviceReportedAt is null and j.printingStartedAt < :before")
     List<PrintJob> findStalePrintingForUpdate(@Param("before") Instant before);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)

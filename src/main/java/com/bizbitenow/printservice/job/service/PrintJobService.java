@@ -2,6 +2,7 @@ package com.bizbitenow.printservice.job.service;
 
 import com.bizbitenow.printservice.common.BusinessException;
 import com.bizbitenow.printservice.common.JobStatus;
+import com.bizbitenow.printservice.common.JobOutcome;
 import com.bizbitenow.printservice.common.ReceiptPayloadValidator;
 import com.bizbitenow.printservice.device.entity.AppDevice;
 import com.bizbitenow.printservice.device.repository.AppDeviceRepository;
@@ -204,14 +205,14 @@ public class PrintJobService {
                 results.add(new OfflineJobBatchResponse.Item(result.clientId(), result.jobId(), job.getStatus(), false, false));
                 continue;
             }
-            applyOfflineResult(job, device, result);
-            job.setClientUpdatedAt(result.clientTimestamp());
-            results.add(new OfflineJobBatchResponse.Item(result.clientId(), result.jobId(), job.getStatus(), true, false));
+            boolean applied = applyOfflineResult(job, device, result);
+            if (applied) job.setClientUpdatedAt(result.clientTimestamp());
+            results.add(new OfflineJobBatchResponse.Item(result.clientId(), result.jobId(), job.getStatus(), applied, false));
         }
         return new OfflineJobBatchResponse(List.copyOf(results));
     }
 
-    private void applyOfflineResult(PrintJob job, AppDevice device, OfflineJobBatchRequest.Result result) {
+    private boolean applyOfflineResult(PrintJob job, AppDevice device, OfflineJobBatchRequest.Result result) {
         JobStatus target = canonicalStatus(result.status());
         if (target == JobStatus.FAILED) {
             if (result.errorMessage() == null || result.errorMessage().isBlank()) {
@@ -223,7 +224,7 @@ public class PrintJobService {
             job.setErrorMessage(result.errorMessage());
             job.setPrintingStartedAt(null);
             logService.add(job, JobStatus.FAILED, result.errorMessage(), device);
-            if (job.getRetryCount() < job.getMaxRetries()) {
+            if (job.getDeviceReportedAt() == null && job.getRetryCount() < job.getMaxRetries()) {
                 job.setRetryCount(job.getRetryCount() + 1);
                 job.setStatus(JobStatus.QUEUED);
                 job.setDevice(null);
@@ -235,13 +236,20 @@ public class PrintJobService {
                 job.setStatus(JobStatus.FAILED);
                 job.setCompletedAt(now);
             }
-            return;
+            return true;
+        }
+        if (target == JobStatus.SENT_TO_PRINTER && job.getStatus() == JobStatus.SENT_TO_PRINTER) {
+            if (!hasPrinterWriteEvidence(result.connected(), result.bytesWritten(), result.flushOk())) {
+                throw invalidSentEvidence();
+            }
+            if (job.getDeviceReportedAt() != null) return false;
+            recordUnconfirmedSend(job, device, result.connected(), result.bytesWritten(), result.flushOk(), result.clientTimestamp());
+            return true;
         }
         if (target != JobStatus.PRINTED_CONFIRMED || job.getStatus() != JobStatus.SENT_TO_PRINTER) {
-            throw conflict("Offline sync only accepts FAILED or PRINTED_CONFIRMED from SENT_TO_PRINTER");
+            throw conflict("Offline sync only accepts SENT_TO_PRINTER, FAILED, or PRINTED_CONFIRMED from SENT_TO_PRINTER");
         }
-        if (!Boolean.TRUE.equals(result.connected()) || result.bytesWritten() == null || result.bytesWritten() <= 0
-                || !Boolean.TRUE.equals(result.flushOk())) {
+        if (!hasPrinterWriteEvidence(result.connected(), result.bytesWritten(), result.flushOk())) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "PRINT_CONFIRMATION_REQUIRED",
                     "PRINTED_CONFIRMED requires connected=true, bytesWritten>0, and flushOk=true");
         }
@@ -252,14 +260,15 @@ public class PrintJobService {
         job.setPrintedAt(result.clientTimestamp());
         job.setCompletedAt(result.clientTimestamp());
         logService.add(job, JobStatus.PRINTED_CONFIRMED, "Offline print confirmation synced", device);
+        return true;
     }
 
     @Transactional
     public PrintJobResponse updateStatus(DevicePrincipal principal, UUID id, UpdateJobStatusRequest request) {
-        if (request.status() != JobStatus.PRINTING && request.status() != JobStatus.SUCCESS
+        if (request.status() != JobStatus.PRINTING && request.status() != JobStatus.SENT_TO_PRINTER && request.status() != JobStatus.SUCCESS
                 && request.status() != JobStatus.PRINTED_CONFIRMED && request.status() != JobStatus.FAILED) {
             throw new BusinessException(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_STATUS",
-                    "Device status must be PRINTING, SUCCESS, or FAILED");
+                    "Device status must be PRINTING, SENT_TO_PRINTER, SUCCESS, or FAILED");
         }
         if (request.status() == JobStatus.FAILED
                 && (request.errorMessage() == null || request.errorMessage().isBlank())) {
@@ -273,6 +282,18 @@ public class PrintJobService {
             throw new BusinessException(HttpStatus.FORBIDDEN, "JOB_NOT_OWNED", "Job is not assigned to this device");
         }
         JobStatus target = canonicalStatus(request.status());
+        if (request.status() == JobStatus.SENT_TO_PRINTER) {
+            if (job.getStatus() != JobStatus.SENT_TO_PRINTER) throw conflict("Illegal job status transition");
+            if (!hasPrinterWriteEvidence(request.connected(), request.bytesWritten(), request.flushOk())) {
+                throw invalidSentEvidence();
+            }
+            if (job.getDeviceReportedAt() == null) {
+                Instant reportedAt = Instant.now();
+                recordUnconfirmedSend(job, device, request.connected(), request.bytesWritten(), request.flushOk(), reportedAt);
+                job.setClientUpdatedAt(reportedAt);
+            }
+            return toResponse(job);
+        }
         if (job.getStatus() == target && (target == JobStatus.PRINTED_CONFIRMED || target == JobStatus.FAILED)) {
             return toResponse(job);
         }
@@ -282,9 +303,7 @@ public class PrintJobService {
         boolean legal = job.getStatus() == JobStatus.SENT_TO_PRINTER && (printingCallback || successCallback || request.status() == JobStatus.FAILED)
                 && (!legacySuccess || job.getPrintingStartedAt() != null);
         if (!legal) throw conflict("Illegal job status transition");
-        if (successCallback &&
-                (!Boolean.TRUE.equals(request.connected()) || request.bytesWritten() == null || request.bytesWritten() <= 0
-                        || !Boolean.TRUE.equals(request.flushOk()))) {
+        if (successCallback && !hasPrinterWriteEvidence(request.connected(), request.bytesWritten(), request.flushOk())) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "PRINT_CONFIRMATION_REQUIRED",
                     "SUCCESS requires connected=true, bytesWritten>0, and flushOk=true");
         }
@@ -309,7 +328,7 @@ public class PrintJobService {
             job.setErrorMessage(request.errorMessage());
             job.setPrintingStartedAt(null);
             logService.add(job, JobStatus.FAILED, safeMessage(request), device);
-            if (job.getRetryCount() < job.getMaxRetries()) {
+            if (job.getDeviceReportedAt() == null && job.getRetryCount() < job.getMaxRetries()) {
                 job.setRetryCount(job.getRetryCount() + 1);
                 job.setStatus(JobStatus.QUEUED);
                 job.setDevice(null);
@@ -470,7 +489,38 @@ public class PrintJobService {
                 job.getErrorMessage(), job.isOpenCashDrawer(), job.isCutPaper(), job.getCopies(), job.getCreatedAt(),
                 job.getUpdatedAt(), job.getDispatchedAt(), job.getPrintedAt(), job.getCompletedAt(),
                 job.getPrinter() == null ? null : job.getPrinter().getId(),
-                Base64.getEncoder().encodeToString(escPos.generate(job.getPayloadJson(), job.isCutPaper())), job.getNextRetryAt());
+                Base64.getEncoder().encodeToString(escPos.generate(job.getPayloadJson(), job.isCutPaper())), job.getNextRetryAt(),
+                outcome(job));
+    }
+
+    private static JobOutcome outcome(PrintJob job) {
+        return switch (job.getStatus()) {
+            case QUEUED, PENDING -> JobOutcome.PENDING;
+            case SENT_TO_PRINTER -> job.getDeviceReportedAt() == null ? JobOutcome.IN_PROGRESS : JobOutcome.SENT_UNCONFIRMED;
+            case PRINTED_CONFIRMED, SUCCESS -> JobOutcome.PRINTED_CONFIRMED;
+            case FAILED -> JobOutcome.FAILED;
+            case CANCELLED -> JobOutcome.CANCELLED;
+            case DISPATCHED, SENT_TO_DEVICE, PRINTING -> JobOutcome.IN_PROGRESS;
+        };
+    }
+
+    private void recordUnconfirmedSend(PrintJob job, AppDevice device, Boolean connected, Long bytesWritten,
+                                       Boolean flushOk, Instant reportedAt) {
+        job.setPrinterConnected(connected);
+        job.setBytesWritten(bytesWritten);
+        job.setFlushOk(flushOk);
+        job.setDeviceReportedAt(reportedAt);
+        job.setPrintingStartedAt(null);
+        logService.add(job, JobStatus.SENT_TO_PRINTER, "Device sent data; printer status was not confirmed", device);
+    }
+
+    private static boolean hasPrinterWriteEvidence(Boolean connected, Long bytesWritten, Boolean flushOk) {
+        return Boolean.TRUE.equals(connected) && bytesWritten != null && bytesWritten > 0 && Boolean.TRUE.equals(flushOk);
+    }
+
+    private BusinessException invalidSentEvidence() {
+        return new BusinessException(HttpStatus.BAD_REQUEST, "SEND_EVIDENCE_REQUIRED",
+                "SENT_TO_PRINTER requires connected=true, bytesWritten>0, and flushOk=true");
     }
 
     private static JobStatus legacyStatus(PrintJob job) {

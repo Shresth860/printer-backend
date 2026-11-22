@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 @Testcontainers(disabledWithoutDocker = true)
 class LegacyJobStatusMigrationTest {
@@ -54,6 +55,7 @@ class LegacyJobStatusMigrationTest {
         Flyway.configure()
                 .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
                 .locations("classpath:db/migration")
+                .target(MigrationVersion.fromVersion("8"))
                 .load()
                 .migrate();
 
@@ -62,6 +64,23 @@ class LegacyJobStatusMigrationTest {
              var result = statement.executeQuery("SELECT order_id, status FROM print_job WHERE seller_id = 'migration-seller'")) {
             Map<String, String> actual = new LinkedHashMap<>();
             while (result.next()) actual.put(result.getString("order_id").substring("legacy-".length()), result.getString("status"));
+            assertEquals(expected, actual);
+        }
+
+        Flyway.configure()
+                .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+                .locations("classpath:db/migration")
+                .load()
+                .migrate();
+
+        try (var connection = DriverManager.getConnection(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+             var statement = connection.createStatement();
+             var result = statement.executeQuery("SELECT order_id, status, device_reported_at FROM print_job WHERE seller_id = 'migration-seller'")) {
+            Map<String, String> actual = new LinkedHashMap<>();
+            while (result.next()) {
+                actual.put(result.getString("order_id").substring("legacy-".length()), result.getString("status"));
+                assertNull(result.getTimestamp("device_reported_at"));
+            }
             assertEquals(expected, actual);
         }
     }

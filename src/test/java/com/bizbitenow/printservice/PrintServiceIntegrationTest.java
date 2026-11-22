@@ -337,6 +337,75 @@ class PrintServiceIntegrationTest {
     }
 
     @Test
+    void unconfirmedSendCallbackIsAcceptedIdempotentlyAndExcludedFromStaleRetries() throws Exception {
+        TokenResponse device = pair("seller-unconfirmed", "Unconfirmed printer");
+        var principal = new com.bizbitenow.printservice.security.DevicePrincipal(device.deviceId(), device.sellerId());
+        var reported = jobService.create(new CreatePrintJobRequest("seller-unconfirmed", "reported-order",
+                JobType.TEST, validPayload(), false, true, 1, "reported-unconfirmed"));
+        var inFlight = jobService.create(new CreatePrintJobRequest("seller-unconfirmed", "inflight-order",
+                JobType.TEST, validPayload(), false, true, 1, "inflight-stale"));
+        jobService.claim(principal, 2);
+        String token = jwtService.issueAccessToken(device.deviceId(), device.sellerId());
+
+        mockMvc.perform(patch("/api/v1/jobs/{id}/status", reported.job().id())
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"SENT_TO_PRINTER\",\"connected\":true,\"bytesWritten\":128,\"flushOk\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lifecycleStatus", is("SENT_TO_PRINTER")))
+                .andExpect(jsonPath("$.outcome", is("SENT_UNCONFIRMED")))
+                .andExpect(jsonPath("$.printedAt", nullValue()));
+        var initialReportTime = jdbc.queryForObject("select device_reported_at from print_job where id = ?",
+                java.sql.Timestamp.class, reported.job().id());
+        mockMvc.perform(patch("/api/v1/jobs/{id}/status", reported.job().id())
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"status\":\"SENT_TO_PRINTER\",\"connected\":true,\"bytesWritten\":256,\"flushOk\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome", is("SENT_UNCONFIRMED")))
+                .andExpect(jsonPath("$.printedAt", nullValue()));
+        assertEquals(128L, jdbc.queryForObject("select bytes_written from print_job where id = ?", Long.class, reported.job().id()));
+        assertEquals(initialReportTime, jdbc.queryForObject("select device_reported_at from print_job where id = ?",
+                java.sql.Timestamp.class, reported.job().id()));
+
+        jdbc.update("update print_job set dispatched_at = now() - interval '10 minutes' where id in (?, ?)",
+                reported.job().id(), inFlight.job().id());
+        jobService.retryStaleJobs();
+        assertEquals("SENT_TO_PRINTER", jdbc.queryForObject("select status from print_job where id = ?",
+                String.class, reported.job().id()));
+        assertEquals(0, jdbc.queryForObject("select retry_count from print_job where id = ?", Integer.class, reported.job().id()));
+        assertEquals("QUEUED", jdbc.queryForObject("select status from print_job where id = ?", String.class, inFlight.job().id()));
+        assertEquals(1, jdbc.queryForObject("select retry_count from print_job where id = ?", Integer.class, inFlight.job().id()));
+    }
+
+    @Test
+    void offlineBatchAcceptsAndDeduplicatesUnconfirmedSend() throws Exception {
+        TokenResponse device = pair("seller-offline-unconfirmed", "Offline printer");
+        var created = jobService.create(new CreatePrintJobRequest("seller-offline-unconfirmed", "offline-unconfirmed-order",
+                JobType.TEST, validPayload(), false, true, 1, "offline-unconfirmed-job"));
+        jobService.claim(new com.bizbitenow.printservice.security.DevicePrincipal(device.deviceId(), device.sellerId()), 1);
+        String token = jwtService.issueAccessToken(device.deviceId(), device.sellerId());
+        UUID clientId = UUID.randomUUID();
+        String clientTime = java.time.Instant.now().plusSeconds(3).toString();
+        String request = "{\"results\":[{\"clientId\":\"" + clientId + "\",\"jobId\":\"" + created.job().id()
+                + "\",\"status\":\"SENT_TO_PRINTER\",\"clientTimestamp\":\"" + clientTime
+                + "\",\"connected\":true,\"bytesWritten\":96,\"flushOk\":true}]}";
+        mockMvc.perform(post("/api/v1/jobs/sync-results").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results[0].applied", is(true)))
+                .andExpect(jsonPath("$.results[0].lifecycleStatus", is("SENT_TO_PRINTER")));
+        mockMvc.perform(post("/api/v1/jobs/sync-results").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results[0].duplicate", is(true)))
+                .andExpect(jsonPath("$.results[0].applied", is(false)));
+        assertEquals(96L, jdbc.queryForObject("select bytes_written from print_job where id = ?", Long.class, created.job().id()));
+        assertNull(jdbc.queryForObject("select printed_at from print_job where id = ?", java.sql.Timestamp.class, created.job().id()));
+        assertNotNull(jdbc.queryForObject("select device_reported_at from print_job where id = ?", java.sql.Timestamp.class, created.job().id()));
+    }
+
+    @Test
     void offlineBatchSyncDeduplicatesAndDoesNotApplyOlderClientState() throws Exception {
         TokenResponse device = pair("seller-offline-sync", "Offline printer");
         var created = jobService.create(new CreatePrintJobRequest("seller-offline-sync", "offline-order",

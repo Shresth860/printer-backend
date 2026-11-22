@@ -1,6 +1,7 @@
 package com.bizbitenow.printservice.job.dto;
 
 import com.bizbitenow.printservice.common.JobStatus;
+import com.bizbitenow.printservice.common.JobOutcome;
 import com.bizbitenow.printservice.common.JobType;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -12,5 +13,5 @@ public record PrintJobResponse(UUID id, String sellerId, UUID deviceId, String o
                                String errorCode, String errorMessage, boolean openCashDrawer, boolean cutPaper,
                                int copies, Instant createdAt, Instant updatedAt, Instant dispatchedAt,
                                Instant printedAt, Instant completedAt, UUID printerId, String payloadBytesBase64,
-                               Instant nextRetryAt) {
+                               Instant nextRetryAt, JobOutcome outcome) {
 }
